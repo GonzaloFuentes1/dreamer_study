@@ -18,14 +18,6 @@ This repository contains educational implementations of the Dreamer algorithm fa
 
 ## Getting Started
 
-1. Install dependencies: `pip install -r requirements.txt`
-2. Run a specific experiment (e.g., DreamerV1 on CartPole):
-   ```bash
-   python -m dreamer_study.scripts.train --version v1 --exp cartpole
-   ```
-
-## Experiments and Configuration
-
 Each version has its own `configs/` folder with YAML files. You can create new experiments there and call them with the `--exp` flag.
 
 Examples included for v1:
