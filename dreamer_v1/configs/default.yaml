@@ -1,0 +1,35 @@
+# Official DreamerV1 Hyperparameters (Hafner et al., 2020)
+env: "CartPole-v1"
+device: "cuda"
+
+# Table 1: Hyperparameters
+training:
+  total_steps: 1000000
+  initial_episodes: 5
+  train_every: 1000 # Paper trains every episode or every X steps
+  train_steps: 100
+  batch_size: 50
+  seq_length: 50
+
+# World Model (theta)
+model:
+  embed_dim: 1024
+  rssm:
+    stoch_dim: 30
+    deter_dim: 200
+    hidden_dim: 400 # Paper uses 400 for MLP layers
+  lr: 0.0006
+  kl_free_nats: 3.0
+
+# Behavior Learning (phi, psi)
+actor:
+  lr: 0.00008
+  horizon: 15
+critic:
+  lr: 0.00008
+  gamma: 0.99
+  lambda: 0.95
+
+# Buffer
+buffer:
+  capacity: 1000000

@@ -1,0 +1,12 @@
+torch
+gymnasium[classic_control,atari,accept-rom-license,box2d,mujoco]
+numpy
+tensorboard
+ruamel.yaml
+tqdm
+swig
+dm_control
+mujoco
+shimmy
+opencv-python
+moviepy

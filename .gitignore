@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Entornos virtuales
+venv/
+env/
+.env
+
+# Archivos de logs y datos de entrenamiento (grandes)
+checkpoints/
+runs/
+logs_vec/
+videos/
+*.log
+
+# IDE specific
+.vscode/
+.idea/
