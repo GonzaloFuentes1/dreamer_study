@@ -1,0 +1,51 @@
+# DreamerV1: DMC Cheetah Run (Continuous Control)
+# Paper: Dream to Control (Hafner et al., 2020)
+env: "dm_control/cheetah-run-v0"
+device: "cuda"
+action_repeat: 2
+num_envs: 10
+
+# Async Processing
+use_async: true
+use_prefetch: true
+
+# Training Schedule
+training:
+  total_steps: 200000
+  initial_episodes: 5
+  train_every: 1000
+  train_steps: 100
+  batch_size: 50
+  seq_length: 50
+
+# World Model
+model:
+  embed_dim: 1024
+  num_units: 400
+  lr: 0.0006
+  kl_free_nats: 3.0
+  rssm:
+    stoch_dim: 30
+    deter_dim: 200
+    hidden_dim: 200
+
+# Actor
+actor:
+  lr: 0.00008
+  horizon: 15
+
+# Critic
+critic:
+  lr: 0.00008
+  gamma: 0.99
+  lambda: 0.95
+
+# Replay Buffer
+buffer:
+  capacity: 1000000
+
+# Logging
+logging:
+  eval_interval: 10000
+  save_interval: 50000
+  video_interval: 50000

@@ -1,0 +1,56 @@
+# DreamerV3: DMC Cheetah Run (Continuous Control)
+# Paper: Mastering Diverse Domains through World Models (Hafner et al., 2023)
+env: "dm_control/cheetah-run-v0"
+device: "cuda"
+action_repeat: 2
+num_envs: 10
+
+# Async Processing
+use_async: true
+use_prefetch: true
+
+# Training Schedule (Table 4)
+training:
+  total_steps: 1000000
+  initial_episodes: 5
+  train_every: 4
+  train_steps: 1
+  batch_size: 16  # Paper Table 4
+  seq_length: 64  # Paper Table 4
+
+# World Model (Table 4)
+model:
+  embed_dim: 1024
+  lr: 0.00004  # Paper Table 4: 4e-5
+  kl_free_nats: 1.0
+  beta_pred: 1.0
+  beta_dyn: 1.0
+  beta_rep: 0.1  # Table 4
+  rssm:
+    stoch_dim: 32
+    stoch_classes: 32
+    deter_dim: 512
+    hidden_dim: 512
+
+# Actor (Table 4)
+actor:
+  horizon: 15
+  entropy_coef: 0.0003  # 3×10⁻⁴
+
+# Critic (Table 4)
+critic:
+  gamma: 0.997  # 1/(1-γ) = 333
+  lambda: 0.95
+  beta_val: 1.0
+  beta_repval: 0.3
+  ema_decay: 0.98
+
+# Replay Buffer
+buffer:
+  capacity: 1000000
+
+# Logging
+logging:
+  eval_interval: 10000
+  save_interval: 50000
+  video_interval: 50000

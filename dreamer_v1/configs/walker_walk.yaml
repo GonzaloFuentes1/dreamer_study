@@ -1,19 +1,24 @@
-# Configuration for Single Environment Training (DM Control Walker)
-# EXACT paper replication: DreamerV1 (Hafner et al., 2020)
+# DreamerV1: DMC Walker Walk (Continuous Control)
+# Paper: Dream to Control (Hafner et al., 2020)
 env: "dm_control/walker-walk-v0"
-action_repeat: 2
 device: "cuda"
+action_repeat: 2
+num_envs: 4
+
+# Async Processing
+use_async: true
+use_prefetch: false
 
 # Training Schedule
 training:
-  total_steps: 2000000  # 2M steps como en el paper (single env)
+  total_steps: 1000000
   initial_episodes: 5
   train_every: 1000
   train_steps: 100
   batch_size: 50
   seq_length: 50
 
-# World Model (theta)
+# World Model
 model:
   embed_dim: 1024
   num_units: 400
@@ -24,16 +29,23 @@ model:
     deter_dim: 200
     hidden_dim: 200
 
-# Behavior Learning (phi, psi)
+# Actor
 actor:
   lr: 0.00008
   horizon: 15
 
+# Critic
 critic:
   lr: 0.00008
   gamma: 0.99
   lambda: 0.95
 
-# Buffer
+# Replay Buffer
 buffer:
   capacity: 1000000
+
+# Logging
+logging:
+  eval_interval: 10000
+  save_interval: 10000
+  video_interval: 10000

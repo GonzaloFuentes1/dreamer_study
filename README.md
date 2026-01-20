@@ -2,12 +2,14 @@
 
 This repository contains educational implementations of the Dreamer algorithm family. The goal is to break down each version to understand the evolution of World Models in Reinforcement Learning.
 
-## Educational Roadmap
+## Project Status
 
-1. **DreamerV1**: Continuous latent states and planning.
-2. **DreamerV2**: Introduction of discrete latent states (Categorical) for better stability in environments like Atari.
-3. **DreamerV3**: Scaling and normalization to work across diverse domains with the same hyperparameters.
-4. **DreamerV4**: (Future/Experimental)
+| Version | Status | Description |
+|:---:|:---:|---|
+| **DreamerV1** | ✅ Ready | Continuous latent states and planning. |
+| **DreamerV2** | ✅ Ready | Discrete latent states (Categorical). |
+| **DreamerV3** | 🚧 In Progress | Scaling and normalization across domains. |
+| **DreamerV4** | 🚧 In Progress | Future/Experimental. |
 
 ## Project Structure
 

@@ -36,6 +36,52 @@ This document follows the pseudo-algorithm from the DreamerV1 paper (**"Dream to
 - **$q_\phi(a_t \mid s_t)$**: Action model (Actor).
 - **$v_\psi(s_t)$**: Value model (Critic).
 - **$V_\lambda(s_`\tau`)$**: $\lambda$-return target.
+
+## Visual Architecture (Dreamer V1 - Gaussian)
+
+The diagram below breaks down the "black box" state $s_t$ into its Recurrent ($h_t$) and Stochastic ($z_t$) components, as implemented in `RSSM`.
+
+$$ s_t = \{ h_t, z_t \} \quad \text{where } z_t \sim \mathcal{N}(\mu, \sigma) $$
+
+```mermaid
+graph TD
+    subgraph "Time t-1"
+        st_prev[State s_{t-1}]
+        st_prev --> ht_prev[h_{t-1}]
+        st_prev --> zt_prev[z_{t-1}]
+        at_prev[Action a_{t-1}]
+    end
+
+    subgraph "Deterministic Path (RNN)"
+        ht_prev & zt_prev & at_prev --> ORANGE_BOX[GRU Cell]
+        ORANGE_BOX --> ht[h_t: Hidden State]
+    end
+
+    subgraph "Stochastic Path (Gaussian)"
+        ht --> BLUE_BOX[Transition MLP]
+        BLUE_BOX --> z_prior[Prior: ẑ_t ~ N(μ, σ)]
+        
+        ht --> RED_BOX[Representation MLP]
+        img_obs[Image o_t] --> RED_BOX
+        RED_BOX --> z_post[Posterior: z_t ~ N(μ, σ)]
+    end
+    
+    subgraph "Reconstruction (Losses)"
+        z_post & ht --> DECODER[Conv Decoder]
+        DECODER --> rec_img[Reconstructed Image x_t]
+        
+        z_post & ht --> REWARD[Reward MLP]
+        REWARD --> rec_rew[Predicted Reward r_t]
+        
+        z_prior -.-> KL((KL Loss))
+        z_post -.-> KL
+    end
+    
+    linkStyle 4,5,6 stroke:orange,stroke-width:2px;
+    linkStyle 8 stroke:blue,stroke-width:2px;
+    linkStyle 10,11 stroke:red,stroke-width:2px;
+```
+
 ## Parallel / Vectorized Implementation
 
 To accelerate data collection, we employ a vectorized environment setup, running $N$ environments in parallel (using `AsyncVectorEnv`).

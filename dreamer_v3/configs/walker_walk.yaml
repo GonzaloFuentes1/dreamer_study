@@ -1,0 +1,59 @@
+# DreamerV3: DMC Walker Walk (Continuous Control)
+# Paper: Mastering Diverse Domains through World Models (Hafner et al., 2023)
+# Hyperparameters from Table 4
+env: "dm_control/walker-walk-v0"
+device: "cuda"
+action_repeat: 2
+num_envs: 16
+
+# Async Processing
+use_async: true
+use_prefetch: false
+
+# Training Schedule (Table 4)
+training:
+  total_steps: 1000000
+  initial_episodes: 5
+  train_every: 4
+  train_steps: 2  # Ratio 512: (16*64*2)/4 = 512
+  batch_size: 16  # Paper Table 4: batch_size = 16
+  seq_length: 64  # Paper Table 4: batch_length = 64
+
+# World Model (Table 4)
+model:
+  embed_dim: 1024
+  cnn_depth: 16    # Base channels (d/16). 16=12M, 32=50M, 48=100M
+  mlp_width: 256   # Hidden size (d). 256=12M, 512=50M, 768=100M
+  lr: 0.00004  # Paper Table 4: 4e-5 (unified learning rate)
+  kl_free_nats: 1.0  # Paper Table 4: Free nats = 1
+  beta_pred: 1.0  # Reconstruction loss scale
+  beta_dyn: 1.0  # Dynamics loss scale
+  beta_rep: 0.1  # Representation loss scale (Table 4)
+  rssm:
+    stoch_dim: 32
+    stoch_classes: 32 # 50M Model: d=512 -> classes=32
+    deter_dim: 1024   # Increased recurrent capacity
+    hidden_dim: 256   # 50M Model: d=512
+
+# Actor (Table 4)
+actor:
+  horizon: 15  # Paper Table 4: H = 15
+  entropy_coef: 0.0003  # Paper Table 4: η = 3×10⁻⁴
+
+# Critic (Table 4)
+critic:
+  gamma: 0.997  # Paper Table 4: 1/(1-γ) = 333 → γ = 0.997
+  lambda: 0.95  # Paper Table 4: λ = 0.95
+  beta_val: 1.0  # Imagination loss scale
+  beta_repval: 0.3  # Replay loss scale (Table 4)
+  ema_decay: 0.98  # EMA regularizer decay (Table 4)
+
+# Replay Buffer
+buffer:
+  capacity: 5000000  # Paper Table 4: 5×10⁶
+
+# Logging
+logging:
+  eval_interval: 10000
+  save_interval: 50000
+  video_interval: 50000

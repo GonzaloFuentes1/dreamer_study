@@ -8,7 +8,6 @@ from .models import WorldModel, ActionModel
 class ValueModel(nn.Module):
     def __init__(self, stoch_dim, deter_dim, hidden_dim=400):
         super().__init__()
-        # Paper code: 3 hidden layers of size 400, then output
         self.net = nn.Sequential(
             nn.Linear(stoch_dim + deter_dim, hidden_dim),
             nn.ELU(),
@@ -29,19 +28,16 @@ class DreamerV1Agent(Agent):
         self.action_dim = action_dim
         self.is_discrete = is_discrete
         
-        # 1. World Model (Theta)
         self.world_model = WorldModel(obs_shape, action_dim, config).to(device)
         
-        # Compile encoder/decoder for faster inference (PyTorch 2.0+)
         try:
             self.world_model.encoder = torch.compile(self.world_model.encoder, mode='reduce-overhead')
             self.world_model.decoder = torch.compile(self.world_model.decoder, mode='reduce-overhead')
         except:
-            pass  # PyTorch < 2.0
+            pass
         
         hidden_dim = config['model'].get('num_units', 400)
         
-        # 2. Actor (Phi)
         self.actor = ActionModel(
             config['model']['rssm']['stoch_dim'], 
             config['model']['rssm']['deter_dim'], 
@@ -50,19 +46,15 @@ class DreamerV1Agent(Agent):
             discrete=is_discrete
         ).to(device)
         
-        # 3. Critic (Psi)
         self.value = ValueModel(
             config['model']['rssm']['stoch_dim'], 
             config['model']['rssm']['deter_dim'],
             hidden_dim=hidden_dim
         ).to(device)
 
-        # Optimizers
-        # Check configs for LR, default to paper values if missing
         model_lr = config['model'].get('lr', 6e-4)
         actor_lr = config['actor'].get('lr', 8e-5)
         
-        # Critic LR sometimes under 'critic', sometimes 'value_lr'
         if 'critic' in config and 'lr' in config['critic']:
             value_lr = config['critic']['lr'] 
         else:
@@ -72,7 +64,6 @@ class DreamerV1Agent(Agent):
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=actor_lr)
         self.value_optimizer = torch.optim.Adam(self.value.parameters(), lr=value_lr)
         
-        # Mixed Precision Scaler
         self.scaler = torch.amp.GradScaler('cuda')
 
     def init_state(self, batch_size):
@@ -83,21 +74,14 @@ class DreamerV1Agent(Agent):
 
     def policy(self, obs, state, last_action, mode='train'):
         with torch.no_grad():
-            # Handle obs normalization for policy inference
             if isinstance(obs, torch.Tensor):
                 obs_tensor = obs.to(self.device)
             else:
-                # Copy to avoid negative stride issues
                 obs_tensor = torch.from_numpy(np.ascontiguousarray(obs)).to(self.device)
             
-            if obs_tensor.dtype == torch.uint8:
-                pass # Encoder deals with it
-            
-            # Since policy sends single observation, unsqueeze dim 0
-            # Obs shape (3, 64, 64) -> (1, 3, 64, 64)
             if len(obs_tensor.shape) == 3:
                 obs_tensor = obs_tensor.unsqueeze(0)
-            elif len(obs_tensor.shape) == 1: # Vector env
+            elif len(obs_tensor.shape) == 1:
                 obs_tensor = obs_tensor.float().unsqueeze(0)
             
             embed = self.world_model.encoder(obs_tensor)
@@ -110,43 +94,23 @@ class DreamerV1Agent(Agent):
             
             if mode == 'train':
                 if not self.is_discrete:
-                     # Paper: "executing the predicted mode action with Normal(0,0.3) exploration noise"
-                     # We ignore the learned standard deviation during data collection
                      action = action_dist.mean + torch.randn_like(action_dist.mean) * 0.3
                 else:
                      action = action_dist.sample()
             else:
-                 # For eval, create video, etc.
-                 # If continuous, mean is usually better. 
                  if not self.is_discrete:
-                     # For TanhNormal (Normal), mean is the mode of the underlying Gaussian
-                     # Our ActionModel returns Normal(mean, std), where mean is already 5*tanh(x).
-                     # So we just take the mean.
                      action = action_dist.mean
                  elif hasattr(action_dist, 'mode'):
-                     # For Categorical, mode() usually works if available or argmax probs
-                     # PyTorch Categorical doesn't always strictly implement .mode() depending on version/mixin
-                     # So let's be safe:
-                     try:
-                        action = action_dist.mode()
-                     except:
-                        action = action_dist.probs.argmax(dim=-1)
+                     action = action_dist.mode()
                  else:
                      action = action_dist.sample()
 
             if not self.is_discrete:
-                 # Squash action to [-1, 1] for continuous control tasks
-                 # This matches the behavior in WorldModel.imagine()
                  action = torch.tanh(action)
 
             if self.is_discrete:
-                if mode == 'train' and np.random.rand() < 0.1:
-                    # Epsilon greedy? batch logic tricky here without more code.
-                    # Assuming continuous for now or single env.
-                    pass
-                
                 if len(obs_tensor) > 1:
-                     action_idx = action.cpu().numpy() # (B,)? No, Categorical.sample returns (B,)
+                     action_idx = action.cpu().numpy()
                      act_data = np.zeros((len(obs_tensor), self.action_dim))
                      act_data[np.arange(len(obs_tensor)), action_idx] = 1.0
                      env_action = action_idx
@@ -164,8 +128,6 @@ class DreamerV1Agent(Agent):
         return act_data, next_state, env_action
 
     def train_step(self, obs, action, reward, terminal):
-        # Observation normalization for reconstruction target
-        # ConvEncoder handles uint8->float internally, so we need matching target
         if obs.dtype == torch.uint8:
             obs_target = obs.float() / 255.0 - 0.5
         elif obs.max() > 1.0:
@@ -173,23 +135,19 @@ class DreamerV1Agent(Agent):
         else:
             obs_target = obs
         
-        # --- 1. World Model Learning ---
         with torch.amp.autocast('cuda'):
             tran_stats, repr_stats, stoch, deter = self.world_model.observe(obs, action)
             
             recon = self.world_model.decoder(stoch, deter)
             pred_rew = self.world_model.reward(stoch, deter)
             
-            # Reconstruction loss (sum over spatial dims, mean over batch/time)
             loss_obs = 0.5 * nn.functional.mse_loss(recon, obs_target, reduction='none').sum(dim=[-3, -2, -1]).mean()
             
-            # Reward loss
             reward_target = reward if reward.dim() == pred_rew.dim() else reward.unsqueeze(-1)
             loss_rew = 0.5 * nn.functional.mse_loss(pred_rew, reward_target).mean()
             
             model_loss = loss_obs + loss_rew
             
-            # PCont loss (Check if enabled)
             if self.world_model.pcont is not None:
                 pred_pcont = self.world_model.pcont(stoch, deter)
                 target_pcont = 1.0 - terminal.float()
@@ -211,10 +169,7 @@ class DreamerV1Agent(Agent):
         self.scaler.unscale_(self.wm_optimizer)
         nn.utils.clip_grad_norm_(self.world_model.parameters(), 100.0)
         self.scaler.step(self.wm_optimizer)
-        # Don't update scaler yet
 
-        # --- 2. Behavior Learning ---
-        # Imagine from all states in the batch (flatten batch and time)
         with torch.amp.autocast('cuda'):
             batch_size, seq_len = stoch.shape[:2]
             start_stoch = stoch.detach().view(-1, stoch.shape[-1])
@@ -234,7 +189,6 @@ class DreamerV1Agent(Agent):
             returns = self.compute_lambda_returns(reward_imag, value_imag, value_imag[:, -1], 
                                                 self.cfg['critic']['lambda'], gamma_input)
 
-            # Actor and Critic updates
             loss_actor = -returns.mean()
         
         self.actor_optimizer.zero_grad()
@@ -253,11 +207,8 @@ class DreamerV1Agent(Agent):
         nn.utils.clip_grad_norm_(self.value.parameters(), 100.0)
         self.scaler.step(self.value_optimizer)
         
-        # Update scaler once at the end
         self.scaler.update()
 
-        # Optimization: Return detached tensors instead of floats to avoid GPU synchronization at every step.
-        # Calling .item() forces a CPU-GPU sync. We delays this until logging.
         return {
             "wm_loss": model_loss.detach(), 
             "kl": loss_kl.detach(), 

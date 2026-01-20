@@ -3,7 +3,7 @@ import pathlib
 import os
 import sys
 
-# CRITICAL: Parse GPU argument BEFORE any imports that use CUDA/EGL
+# Parse GPU argument BEFORE any imports that use CUDA/EGL
 # This ensures CUDA_VISIBLE_DEVICES is set before dm_control initializes EGL
 parser = argparse.ArgumentParser()
 parser.add_argument("--version", type=str, default="v1")
@@ -16,19 +16,15 @@ args = parser.parse_args()
 # Set GPU BEFORE importing dm_control (which initializes EGL)
 os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
 
-# Now configure MuJoCo rendering - EGL will see the correct GPU
+# Configure MuJoCo rendering
 os.environ['MUJOCO_GL'] = 'egl'
 os.environ['__NV_PRIME_RENDER_OFFLOAD'] = '1'
 os.environ['__GLX_VENDOR_LIBRARY_NAME'] = 'nvidia'
 
-# Threading: dejar que OpenMP/MKL detecten automáticamente
-# os.environ['OMP_NUM_THREADS'] = '10'
-# os.environ['MKL_NUM_THREADS'] = '10'
-
 # PyTorch optimizations
 os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
 
-# Now safe to import everything else
+# Safe to import everything else
 import torch
 import numpy as np
 import datetime
@@ -50,6 +46,8 @@ from common.buffer import ReplayBuffer
 from common.buffer_parallel import ParallelReplayBuffer
 from common.prefetch_buffer import PrefetchBuffer
 from dreamer_v1.agent import DreamerV1Agent
+from dreamer_v2.agent import DreamerV2Agent
+from dreamer_v3.agent import DreamerV3Agent
 
 def load_config(version, exp_name):
     yaml = YAML(typ='safe')
@@ -71,7 +69,14 @@ def eval_and_record(agent, env_id, step, video_dir, device, max_steps=500, actio
     
     stoch_dim = agent.cfg['model']['rssm']['stoch_dim']
     deter_dim = agent.cfg['model']['rssm']['deter_dim']
-    state = (torch.zeros(1, stoch_dim).to(device), torch.zeros(1, deter_dim).to(device))
+    
+    # For V2: stoch_flat is stoch_dim * stoch_classes
+    if hasattr(agent, 'rssm') and hasattr(agent.rssm, 'stoch_classes'):
+        stoch_flat_dim = stoch_dim * agent.rssm.stoch_classes
+    else:
+        stoch_flat_dim = stoch_dim
+    
+    state = (torch.zeros(1, stoch_flat_dim).to(device), torch.zeros(1, deter_dim).to(device))
     
     action_dim = env.action_space.shape[0] if hasattr(env.action_space, 'shape') else env.action_space.n
     last_action = torch.zeros(1, action_dim).to(device)
@@ -156,21 +161,32 @@ def main():
             (action_dim,)
         )
     
-    agent = DreamerV1Agent(config, obs_shape, action_dim, is_discrete, device)
+    # Select agent based on version
+    if args.version == "v1":
+        agent = DreamerV1Agent(config, obs_shape, action_dim, is_discrete, device)
+    elif args.version == "v2":
+        agent = DreamerV2Agent(config, obs_shape, action_dim, is_discrete, device)
+    elif args.version == "v3":
+        agent = DreamerV3Agent(config, obs_shape, action_dim, is_discrete, device)
+    else:
+        raise ValueError(f"Unknown version: {args.version}")
     
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     run_id = f"{args.version}_{args.exp}_{timestamp}"
     
-    log_dir = pathlib.Path(f"runs/{run_id}")
-    ckpt_dir = pathlib.Path(f"checkpoints/{run_id}")
-    video_dir = pathlib.Path(f"videos/{run_id}")
+    # Unified structure: everything inside runs/<version>/<run_id>/
+    run_dir = pathlib.Path(f"runs/{args.version}/{run_id}")
+    log_dir = run_dir / "logs"
+    ckpt_dir = run_dir / "checkpoints"
+    video_dir = run_dir / "videos"
     
+    run_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     video_dir.mkdir(parents=True, exist_ok=True)
     
     writer = SummaryWriter(log_dir=str(log_dir))
-    json_log_path = log_dir / "metrics.jsonl"
+    json_log_path = run_dir / "metrics.jsonl"
     
     def log_metrics(step, metrics):
         entry = {'step': step, 'timestamp': time.time()}
@@ -273,8 +289,15 @@ def main():
     stoch_dim = config['model']['rssm']['stoch_dim']
     deter_dim = config['model']['rssm']['deter_dim']
     
+    # For V2/V3: stoch_flat is stoch_dim * stoch_classes, for V1: stoch_dim
+    if args.version in ["v2", "v3"]:
+        stoch_classes = config['model']['rssm'].get('stoch_classes', 32)
+        stoch_flat_dim = stoch_dim * stoch_classes
+    else:
+        stoch_flat_dim = stoch_dim
+    
     batch_size_state = num_envs if is_vectorized else 1
-    state = (torch.zeros(batch_size_state, stoch_dim).to(device), torch.zeros(batch_size_state, deter_dim).to(device))
+    state = (torch.zeros(batch_size_state, stoch_flat_dim).to(device), torch.zeros(batch_size_state, deter_dim).to(device))
     last_action = torch.zeros(batch_size_state, action_dim, device=device, dtype=torch.float32)
     
     episode_reward = np.zeros(num_envs) if is_vectorized else 0

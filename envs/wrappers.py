@@ -68,7 +68,7 @@ class DMCtoGymWrapper(gym.Env):
     """
     metadata = {'render_modes': ['rgb_array']}
     
-    def __init__(self, domain_name, task_name, task_kwargs=None, visualize_reward=False, resize=[64,64], record=False, record_freq=100, record_path='../', max_episode_steps=1000, camera=None, render_mode='rgb_array'):
+    def __init__(self, domain_name, task_name, task_kwargs=None, visualize_reward=False, resize=[64,64], record=False, record_freq=100, record_path='../', max_episode_steps=1000, camera=None, render_mode='rgb_array', action_repeat=1):
         super().__init__()
         self.render_mode = render_mode
         self.env = suite.load(domain_name, task_name, task_kwargs=task_kwargs, visualize_reward=visualize_reward)
@@ -77,6 +77,7 @@ class DMCtoGymWrapper(gym.Env):
         self.record_freq = record_freq
         self.record_path = record_path
         self.max_episode_steps = max_episode_steps
+        self.action_repeat = action_repeat
         self.current_step = 0
         self.total_reward = 0
         self.recorder = None
@@ -91,9 +92,7 @@ class DMCtoGymWrapper(gym.Env):
             dtype=np.float32
         )
         
-        # NO usar pixels.Wrapper - renderizamos directamente
         self.resize = resize
-        # Optimización: uint8 ocupa 4 veces menos memoria
         self.observation_space = gym.spaces.Box(low=0, high=255, shape=(3, *resize), dtype=np.uint8)
 
         if camera is None:
@@ -105,20 +104,26 @@ class DMCtoGymWrapper(gym.Env):
         self._camera = camera
 
     def step(self, action):
-        time_step = self.env.step(action)
+        step_reward = 0.0
+        termination = False
+        truncation = False
         
-        # Render NATIVO + AREA + T: Configuración óptima para 64x64 (16.35ms)
-        obs = self.env.physics.render(camera_id=self._camera)
-        # cv2.INTER_AREA: ideal para downscaling, más rápido Y mejor calidad
-        obs = cv2.resize(obs, tuple(self.resize), interpolation=cv2.INTER_AREA)
+        for _ in range(self.action_repeat):
+            time_step = self.env.step(action)
+            r = time_step.reward if time_step.reward is not None else 0
+            step_reward += r
+            self.total_reward += (r or 0)
+            self.current_step += 1
+            
+            termination = time_step.last()
+            truncation = (self.current_step == self.max_episode_steps)
+            
+            if termination or truncation:
+                break
+        
+        obs = self.env.physics.render(height=self.resize[0], width=self.resize[1], camera_id=self._camera)
         obs = obs.transpose([2, 0, 1])  # HWC -> CHW
         
-        reward = time_step.reward if time_step.reward is not None else 0
-        self.total_reward += (reward or 0)
-        self.current_step += 1
-        
-        termination = time_step.last()
-        truncation = (self.current_step == self.max_episode_steps)
         info = {}
         if termination or truncation:
             info = {
@@ -130,7 +135,6 @@ class DMCtoGymWrapper(gym.Env):
             
         if self.record:
             if self.episode_count % self.record_freq == 0:
-                # Para video, render en alta resolución
                 frame = self.env.physics.render(camera_id=self._camera, height=480, width=640)
                 self.frames.append(frame.copy())
                 
@@ -138,7 +142,7 @@ class DMCtoGymWrapper(gym.Env):
                     self._save_video()
                     info['video_path'] = self.video_path
         
-        return obs, reward, termination, truncation, info
+        return obs, step_reward, termination, truncation, info
 
     def reset(self, seed=None, options=None):
         self.current_step = 0
@@ -148,9 +152,7 @@ class DMCtoGymWrapper(gym.Env):
         
         # DM Control suite handles seeding at load time usually.
         time_step = self.env.reset()
-        # Render NATIVO + AREA + T: configuración óptima para 64x64 (16.35ms)
-        obs = self.env.physics.render(camera_id=self._camera)
-        obs = cv2.resize(obs, tuple(self.resize), interpolation=cv2.INTER_AREA)
+        obs = self.env.physics.render(height=self.resize[0], width=self.resize[1], camera_id=self._camera)
         obs = obs.transpose([2, 0, 1])  # HWC -> CHW
         
         return obs, {}
@@ -161,7 +163,6 @@ class DMCtoGymWrapper(gym.Env):
             
         self.video_path = os.path.join(self.record_path, f"episode_{self.episode_count}.mp4")
         try:
-            # Optimizacion para VS Code / Web: H.264 + YUV420P
             imageio.mimwrite(self.video_path, self.frames, fps=30, macro_block_size=None, 
                              quality=8, codec='libx264', pixelformat='yuv420p')
         except Exception as e:
@@ -247,9 +248,7 @@ def make_env(env_id, action_repeat=2, seed=None, record=False, record_path='vide
         domain = parts[0]
         task = parts[1].replace("-v0", "")
         
-        # Usamos el wrapper de Minh que tiene grabación interna
-        env = DMCtoGymWrapper(domain, task, record=record, record_path=record_path, record_freq=record_freq)
-        env = ActionRepeat(env, action_repeat)
+        env = DMCtoGymWrapper(domain, task, record=record, record_path=record_path, record_freq=record_freq, action_repeat=action_repeat)
         env = NormalizeActions(env)
     else:
         env = gym.make(env_id, render_mode="rgb_array")
