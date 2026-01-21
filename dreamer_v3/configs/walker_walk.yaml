@@ -3,6 +3,7 @@
 # Hyperparameters from Table 4
 env: "dm_control/walker-walk-v0"
 device: "cuda"
+continuous_actions: true
 action_repeat: 2
 num_envs: 16
 
@@ -50,10 +51,10 @@ critic:
 
 # Replay Buffer
 buffer:
-  capacity: 5000000  # Paper Table 4: 5×10⁶
+  capacity: 1000000  # Reduced to 1M (approx 12GB RAM)
 
 # Logging
 logging:
-  eval_interval: 10000
+  eval_interval: 2000
   save_interval: 50000
   video_interval: 50000

@@ -37,6 +37,7 @@ class RSSM_V2(nn.Module):
     def get_stoch_state(self, logits):
         shape = logits.shape
         logits = logits.view(shape[:-1] + (self.stoch_dim, self.stoch_classes))
+        logits = torch.clamp(logits, -10.0, 10.0) # Clamp for stability
         
         dist = OneHotCategorical(logits=logits)
         log_prob = dist.logits
@@ -69,8 +70,10 @@ class RSSM_V2(nn.Module):
             deter = self.step(stoch_flat, action[:, t], deter)
             
             prior_logits = self.prior_net(deter)
+            prior_logits = torch.clamp(prior_logits, -10.0, 10.0) # Clamp for stability
             
             post_logits = self.posterior_net(torch.cat([deter, embed[:, t]], dim=-1))
+            post_logits = torch.clamp(post_logits, -10.0, 10.0) # Clamp for stability
             
             dist_post, stoch, stoch_flat = self.get_stoch_state(post_logits)
 
@@ -106,6 +109,7 @@ class RSSM_V2(nn.Module):
             
             curr_deter = self.step(curr_stoch_flat, action, curr_deter)
             prior_logits = self.prior_net(curr_deter)
+            prior_logits = torch.clamp(prior_logits, -10.0, 10.0) # Clamp for stability
             dist, stoch, curr_stoch_flat = self.get_stoch_state(prior_logits)
             
             stochs_list.append(curr_stoch_flat)

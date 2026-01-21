@@ -1,35 +1,26 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import OneHotCategorical, OneHotCategoricalStraightThrough, Distribution
-
+import einops
+from torch.distributions import OneHotCategorical, Distribution
+import math
 
 def symlog(x):
     """Symlog: sign(x) * ln(|x| + 1)"""
-    return torch.sign(x) * torch.log(torch.abs(x) + 1)
+    return torch.sign(x) * torch.log(torch.abs(x) + 1.0)
 
 
 def symexp(x):
     """Inverse of symlog: sign(x) * (exp(|x|) - 1)"""
-    return torch.sign(x) * (torch.exp(torch.abs(x)) - 1)
+    return torch.sign(x) * (torch.exp(torch.abs(x)) - 1.0)
 
 
 def create_symexp_bins(num_bins=255, device='cuda'):
-    """Create exponentially spaced bins from -20 to +20 in symexp space.
-    Returns bins in normal space for direct comparison with reward/return values.
-    """
     bins = torch.linspace(-20, 20, num_bins, device=device)
     return symexp(bins)
 
 
 def twohot_encode(x, bins):
-    """Twohot encode scalars into vectors with weights on two closest bins.
-    Args:
-        x: tensor of any shape
-        bins: (num_bins,) sorted bin positions
-    Returns:
-        target: (*x.shape, num_bins) with twohot encoding
-    """
     x = x.unsqueeze(-1)  # Add bin dimension
     below = (bins <= x).sum(dim=-1, dtype=torch.int64) - 1
     below = torch.clamp(below, 0, len(bins) - 2)
@@ -46,330 +37,368 @@ def twohot_encode(x, bins):
     return target
 
 
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-5):
+        super().__init__()
+        # Ensure dim is int (channels/features)
+        if isinstance(dim, (list, tuple)): 
+            dim = dim[0]
+        self.scale = nn.Parameter(torch.ones(dim))
+        self.eps = eps
+
+    def forward(self, x):
+        original_dtype = x.dtype
+        x_f32 = x.float()
+        
+        if x.ndim == 4: # Image [B, C, H, W]
+            norm = torch.mean(x_f32 ** 2, dim=1, keepdim=True)
+            scale = self.scale.view(1, -1, 1, 1)
+            out = x_f32 * torch.rsqrt(norm + self.eps) * scale
+        else: # Vector [B, ..., D]
+            norm = torch.mean(x_f32 ** 2, dim=-1, keepdim=True)
+            out = x_f32 * torch.rsqrt(norm + self.eps) * self.scale
+            
+        return out.to(original_dtype)
+
+
 class BlockLinear(nn.Module):
-    def __init__(self, in_features: int, out_features: int, num_blocks: int, bias: bool = True):
+    def __init__(self, in_features, out_features, num_blocks, bias=True):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.num_blocks = num_blocks
-        assert in_features % num_blocks == 0
-        assert out_features % num_blocks == 0
         
-        # GroupConv1d is mathematically equivalent to Block Diagonal Linear
-        # Input shape: [B, C_in, 1] -> Output: [B, C_out, 1]
-        self.conv = nn.Conv1d(
-            in_channels=in_features,
-            out_channels=out_features,
-            kernel_size=1,
-            groups=num_blocks,
-            bias=bias
-        )
+        # Ensure divisibility
+        if in_features % num_blocks != 0:
+            raise ValueError(f"in_features {in_features} not divisible by blocks {num_blocks}")
+        if out_features % num_blocks != 0:
+            raise ValueError(f"out_features {out_features} not divisible by blocks {num_blocks}")
+            
+        self.chunk_in = in_features // num_blocks
+        self.chunk_out = out_features // num_blocks
         
-        # Initialize weights properly (Conv1d init is different from Linear)
-        # We want to mimic Kaiming Uniform
-        fan_in = (in_features // num_blocks)
-        bound = (1 / fan_in) ** 0.5 if fan_in > 0 else 0
-        nn.init.uniform_(self.conv.weight, -bound, bound)
-        if bias and self.conv.bias is not None:
-            nn.init.uniform_(self.conv.bias, -bound, bound)
+        # Initialize weights with standard initialization (truncated normal approximation)
+        self.weight = nn.Parameter(torch.empty(num_blocks, self.chunk_out, self.chunk_in))
+        nn.init.trunc_normal_(self.weight, std=1.0 / math.sqrt(self.chunk_in), a=-2.0, b=2.0)
+        
+        if bias:
+            self.bias = nn.Parameter(torch.zeros(num_blocks, self.chunk_out))
+        else:
+            self.register_parameter('bias', None)
 
     def forward(self, x):
-        original_shape = x.shape
-        x = x.view(-1, self.in_features, 1)
+        # x: [B, C] or [B, T, C]
+        shape = x.shape
+        x_flat = x.view(-1, self.in_features) # Collapse batch/time
         
-        y = self.conv(x)
+        B = x_flat.shape[0]
+        x_blocked = x_flat.view(B, self.num_blocks, self.chunk_in)
         
-        out_shape = original_shape[:-1] + (self.out_features,)
-        return y.view(out_shape)
+        # Block-wise matrix mult: [B, K, I] @ [K, I, O] -> [B, K, O]
+        # Weight is [K, O, I]. Transpose to [K, I, O] for matmul
+        w = self.weight.transpose(1, 2)
+        
+        # Parallel mm over blocks
+        # We can use einsum: b k i, k i o -> b k o
+        y = torch.einsum('bki,kio->bko', x_blocked, w)
+        
+        if self.bias is not None:
+            y = y + self.bias
+            
+        y = y.reshape(B, self.out_features)
+        return y
 
 
-class RSSM_V3(nn.Module):
-    """
-    RSSM with Block-Diagonal GRU and Discrete Latents.
-    """
-    def __init__(self, action_dim, stoch_dim=32, stoch_classes=32, deter_dim=512, hidden_dim=512, embed_dim=1024, blocks=8):
+class GRUCell(nn.Module):
+    """GRU Cell with optional Layer Norm and Block Matrices."""
+    def __init__(self, input_size, hidden_size, norm=True, blocks=None):
         super().__init__()
-        self.stoch_dim = stoch_dim
-        self.stoch_classes = stoch_classes
-        self.deter_dim = deter_dim
-        self.hidden_dim = hidden_dim
-        self.blocks = blocks
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.norm = norm
+        # Standard Linear for Input->Hidden (not part of recurrent state per se)
+        self.fc_x = nn.Linear(input_size, 3 * hidden_size)
         
-        stoch_flat_dim = stoch_dim * stoch_classes
-        
-        # 1. Input Embeddings (Dense)
-        self.img_in = nn.Sequential(nn.Linear(embed_dim, hidden_dim, bias=False))
-        self.action_in = nn.Sequential(nn.Linear(action_dim, hidden_dim, bias=False))
-        self.stoch_in = nn.Sequential(nn.Linear(stoch_flat_dim, hidden_dim, bias=False))
-        self.deter_in = nn.Sequential(nn.Linear(deter_dim, hidden_dim, bias=False))
-        
-        # 2. Recurrent Step (Block Diagonal Deep Cell)
-        # Structure: Concat Inputs -> Layer -> Layer -> GRU Cell
-        self.obs_out_norm = RMSNorm(hidden_dim)
-        
-        # We process the concatenated inputs (4 * hidden_dim) down to hidden_dim using blocks?
-        # Actually JAX code repeats the input across blocks.
-        # Simplification for PyTorch: Dense projection to deter_dim then BlockGRU
-        
-        # Implementation following JAX "core": 
-        # Inputs are processed and concatenated.
-        # Then BlockLinear layers.
-        
-        self.pre_gru_net = nn.Sequential(
-            BlockLinear(hidden_dim, hidden_dim, blocks),
-            RMSNorm(hidden_dim),
-            nn.SiLU()
-        )
-        
-        # Block GRU Gates
-        # Input to GRU is hidden_dim, State is deter_dim
-        # We need gates for (reset, cand, update)
-        # Weights for Input: [hidden_dim -> 3*deter_dim] (Block)
-        # Weights for Hidden: [deter_dim -> 3*deter_dim] (Block)
-        self.gru_x = BlockLinear(hidden_dim, 3 * deter_dim, blocks)
-        self.gru_h = BlockLinear(deter_dim, 3 * deter_dim, blocks)
-
-        # 3. Posteriors / Priors
-        self.prior_net = nn.Sequential(
-            nn.Linear(deter_dim, hidden_dim),
-            RMSNorm(hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, stoch_flat_dim)
-        )
-
-        self.posterior_net = nn.Sequential(
-            nn.Linear(deter_dim + embed_dim, hidden_dim),
-            RMSNorm(hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, stoch_flat_dim)
-        )
-    
-    def get_stoch_state(self, logits, mix_ratio=0.01):
-        """Mix with 1% uniform in probability space."""
-        shape = logits.shape
-        logits = logits.view(shape[:-1] + (self.stoch_dim, self.stoch_classes))
-        probs = F.softmax(logits, dim=-1)
-        probs = (1 - mix_ratio) * probs + mix_ratio / self.stoch_classes
-        # dist = OneHotCategorical(probs=probs) # Removed for speed
-        mixed_logits = torch.log(probs + 1e-8)
-        stoch = F.gumbel_softmax(mixed_logits, tau=1.0, hard=True, dim=-1)
-        stoch_flat = stoch.view(shape[:-1] + (self.stoch_dim * self.stoch_classes,))
-        return None, stoch, stoch_flat # Return None as dist
-
-    def step(self, prev_stoch_flat, x_action, prev_deter):
-        # 1. Embed inputs (Dense mixing)
-        x_stoch = self.stoch_in(prev_stoch_flat)
-        # x_action is now precomputed and passed in
-        x_deter = self.deter_in(prev_deter)
-        
-        # Sum embeddings (as they project to same hidden_dim) - equivalent to JAX concat then matmul if weights aligned
-        x = x_stoch + x_action + x_deter
-        x = F.silu(self.obs_out_norm(x))
-        
-        # 2. Deep Block Processing
-        x = self.pre_gru_net(x)
-        
-        # 3. Block GRU Step
-        # Calculate gates
-        gates_x = self.gru_x(x)
-        gates_h = self.gru_h(prev_deter)
-        gates = gates_x + gates_h
-        
-        reset, cand, update = torch.chunk(gates, 3, dim=-1)
-        
-        reset = torch.sigmoid(reset)
-        update = torch.sigmoid(update - 1) # Bias -1 for forget gate (Dreamer trick)
-        cand = torch.tanh(reset * cand)
-        
-        deter = update * cand + (1 - update) * prev_deter
-        return deter
-
-    def observe(self, embed, action, state=None):
-        batch_size, seq_len, _ = embed.shape
-        if state is None:
-            deter = torch.zeros(batch_size, self.deter_dim, device=embed.device)
-            stoch_flat = torch.zeros(batch_size, self.stoch_dim * self.stoch_classes, device=embed.device)
+        # Block Linear for Hidden->Hidden (The recurrent part)
+        if blocks:
+             self.fc_h = BlockLinear(hidden_size, 3 * hidden_size, num_blocks=blocks)
         else:
-            stoch_flat, deter = state
+             self.fc_h = nn.Linear(hidden_size, 3 * hidden_size)
+
+        if norm:
+            self.norm_x = RMSNorm(3 * hidden_size)
+            self.norm_h = RMSNorm(3 * hidden_size)
+
+    def forward(self, x, h):
+        # x: Input
+        # h: Hidden state from previous step
+        
+        # Force h to match x's batch size to prevent dimension mismatches
+        if x.shape[0] != h.shape[0]:
+            h = h[:x.shape[0]].contiguous()
+        
+        x_out = self.fc_x(x)
+        h_out = self.fc_h(h)
+        
+        if self.norm:
+            x_out = self.norm_x(x_out)
+            h_out = self.norm_h(h_out)
+        
+        x_r, x_z, x_n = torch.chunk(x_out, 3, dim=-1)
+        h_r, h_z, h_n = torch.chunk(h_out, 3, dim=-1)
+        
+        r = torch.sigmoid(x_r + h_r)
+        z = torch.sigmoid(x_z + h_z)
+        
+        # New h candidate
+        n = torch.tanh(x_n + r * h_n)
+        
+        next_h = (1 - z) * n + z * h
+        return next_h
 
 
-        # [B, T, A] -> [B, T, H]
-        x_action_seq = self.action_in(action)
+class OneHotDist(Distribution):
+    def __init__(self, logits=None, probs=None, unimix_ratio=0.01):
+        if logits is not None and probs is None:
+            # Handle numerical stability for softmax
+            # mix 1% uniform (paper default)
+            probs = F.softmax(logits, dim=-1)
+            if unimix_ratio > 0:
+                uniform = torch.ones_like(probs) / probs.shape[-1]
+                probs = (1.0 - unimix_ratio) * probs + unimix_ratio * uniform
+                logits = torch.log(torch.clamp(probs, min=1e-8))
+                
+        self.logits = logits
+        self.probs = probs
+        # Ensure safe probs for Validation with stronger clamping
+        self.probs = torch.clamp(self.probs, min=1e-6, max=1.0)
+        # Normalize with numerical stability
+        probs_sum = self.probs.sum(dim=-1, keepdim=True)
+        probs_sum = torch.clamp(probs_sum, min=1e-6)
+        self.probs = self.probs / probs_sum
+        
+        self.cat = OneHotCategorical(probs=self.probs)
 
-        prior_logits_list = []
-        post_logits_list = []
-        deters_list = []
-        stochs_flat_list = []
+    def sample(self, sample_shape=torch.Size()):
+        return self.cat.sample(sample_shape)
+        
+    def log_prob(self, value):
+        return self.cat.log_prob(value)
+        
+    @property
+    def mode(self):
+        return self.cat.mode
 
-        for t in range(seq_len):
-            deter = self.step(stoch_flat, x_action_seq[:, t], deter)
+
+class RSSM(nn.Module):
+    def __init__(self, action_dim, config=None):
+        super().__init__()
+        # Defaults + accept both *_dim and legacy keys
+        if config:
+            self.stoch = config.get('stoch', config.get('stoch_dim', 32))
+            self.classes = config.get('classes', config.get('stoch_classes', 32))
+            self.deter = config.get('deter', config.get('deter_dim', 512))
+            self.hidden = config.get('hidden', config.get('hidden_dim', 512))
+            self.embed = config.get('embed', config.get('embed_dim', 1024))
+        else:
+            self.stoch = 32
+            self.classes = 32
+            self.deter = 512
+            self.hidden = 512
+            self.embed = 1024
+        
+        self.stoch_channels = self.stoch * self.classes
+        self.act = nn.SiLU()
+        
+        # 1. Deterministic Path Input (from "Imagination")
+        # Input: [stoch, action]
+        # Renamed to img_in (Imagination Input) because agent.py expects it
+        self.img_in = nn.Sequential(
+            nn.Linear(self.stoch_channels + action_dim, self.hidden),
+            RMSNorm(self.hidden),
+            self.act
+        )
+        
+        # Use BlockLinear in GRU if blocks specified
+        blocks = config.get('blocks', 16) if config else 16
+        self.cell_layer = GRUCell(self.hidden, self.deter, norm=True, blocks=blocks)
+        
+        # 3. Output from Deter to Posterior/Prior 
+        # (This is implicitly used by prior_net and posterior_net)
+        
+        # 4. Posterior (Observe)
+        # Input: [deter, embed]
+        self.obs_out = nn.Sequential(
+             nn.Linear(self.deter + self.embed, self.hidden),
+             RMSNorm(self.hidden),
+             self.act,
+             nn.Linear(self.hidden, self.stoch_channels)
+        )
+        
+        # 5. Prior (Imagine)
+        # Input: [deter]
+        self.img_out = nn.Sequential(
+             nn.Linear(self.deter, self.hidden),
+             RMSNorm(self.hidden),
+             self.act,
+             nn.Linear(self.hidden, self.stoch_channels)
+        )
+
+    def initial(self, batch_size, device):
+        return (
+            torch.zeros(batch_size, self.stoch_channels, device=device),
+            torch.zeros(batch_size, self.deter, device=device)
+        )
+
+    def cell(self, x, h):
+        return self.cell_layer(x, h)
+
+    def get_dist(self, logits):
+        shape = logits.shape
+        logits = logits.view(*(shape[:-1] + (self.stoch, self.classes)))
+        
+        # Using Mixed Distribution (Uniform Mix) for stability
+        dist = OneHotDist(logits, unimix_ratio=0.01)
+        return dist
+        
+    def observe(self, embed, action, state=None):
+        if state is None:
+            state = self.initial(embed.shape[0], embed.device)
+        
+        stoch_flat, deter = state
+        
+        post_logits = []
+        deters = []
+        stochs_flat = []
+        prior_logits = []
+        
+        # Loop over time
+        for t in range(embed.shape[1]):
+            # 1. Deterministic Path
+            # Embed stoch+action
+            inp = torch.cat([stoch_flat, action[:, t]], dim=-1)
+            x = self.img_in(inp)
+            deter = self.cell(x, deter)
+            deters.append(deter)
             
-            post_logits = self.posterior_net(torch.cat([deter, embed[:, t]], dim=-1))
+            # 2. Stochastic Path
+            # Posterior
+            obs_inp = torch.cat([deter, embed[:, t]], dim=-1)
+            logit = self.obs_out(obs_inp)
+            post_logits.append(logit)
             
-            _, _, stoch_flat = self.get_stoch_state(post_logits)
+            # Prior (for KL later)
+            prior_logit = self.img_out(deter)
+            prior_logits.append(prior_logit)
             
-            post_logits_list.append(post_logits)
-            deters_list.append(deter)
-            stochs_flat_list.append(stoch_flat)
-        
-        deters = torch.stack(deters_list, dim=1)
-        
-        prior_logits = self.prior_net(deters)
-        
-        post_logits = torch.stack(post_logits_list, dim=1)
-        stochs_flat = torch.stack(stochs_flat_list, dim=1)
-        
-        return prior_logits, post_logits, stochs_flat, deters
+            # Sample Posterior for next step
+            dist = self.get_dist(logit)
+            stoch = dist.sample()
+            stoch_flat = stoch.view(stoch.shape[0], -1)
+            stochs_flat.append(stoch_flat)
+            
+        return {
+            'deter': torch.stack(deters, dim=1),
+            'stoch': torch.stack(stochs_flat, dim=1).view(embed.shape[0], embed.shape[1], self.stoch, self.classes),
+            'logit': torch.stack(post_logits, dim=1),
+            'prior_logit': torch.stack(prior_logits, dim=1)
+        }
 
-    def imagine(self, actor, start_state, horizon, is_discrete=False):
-        stoch_flat, deter = start_state
+    def imagine(self, policy, start_state, horizon):
+        deter = start_state['deter']
+        stoch = start_state['stoch']
+        stoch_flat = stoch.reshape(stoch.shape[0], -1)
         
-        stochs_list = []
-        deters_list = []
-        actions_list = []
-        
-        curr_stoch_flat = stoch_flat
-        curr_deter = deter
+        deters = []
+        stochs = []
+        actions = []
         
         for t in range(horizon):
-            feat = torch.cat([curr_deter, curr_stoch_flat], dim=-1)
-            action = actor(feat)  # Keep gradients for dynamics backprop
+            feat = torch.cat([deter, stoch_flat], dim=-1)
+            action = policy(feat)
+            actions.append(action)
             
-            if not is_discrete:
-                action = torch.tanh(action)
+            inp = torch.cat([stoch_flat, action], dim=-1)
+            x = self.img_in(inp)
+            deter = self.cell(x, deter)
+            deters.append(deter)
             
-            # Embed action for step
-            x_action = self.action_in(action)
+            prior_logit = self.img_out(deter)
+            dist = self.get_dist(prior_logit)
+            stoch = dist.sample()
+            stoch_flat = stoch.view(stoch.shape[0], -1)
+            stochs.append(stoch)
             
-            curr_deter = self.step(curr_stoch_flat, x_action, curr_deter)
-            prior_logits = self.prior_net(curr_deter)
-            _, stoch, curr_stoch_flat = self.get_stoch_state(prior_logits)
-            
-            stochs_list.append(curr_stoch_flat)
-            deters_list.append(curr_deter)
-            actions_list.append(action)
-        
-        img_stoch = torch.stack(stochs_list, dim=1)
-        img_deter = torch.stack(deters_list, dim=1)
-        img_actions = torch.stack(actions_list, dim=1)
-        
-        return img_deter, img_stoch, img_actions
-
-    def kl_loss(self, post_logits, prior_logits, free_nats=1.0, beta_dyn=1.0, beta_rep=0.1):
-        """V3 KL loss with mixture distribution"""
-        # Helper to get mixed distribution
-        def _get_dist(l):
-            shape = l.shape
-            l = l.view(shape[:-1] + (self.stoch_dim, self.stoch_classes))
-            p = F.softmax(l, dim=-1)
-            p = 0.99 * p + 0.01 / self.stoch_classes
-            return OneHotCategorical(probs=p)
-
-        # L_dyn: sg(posterior) || prior
-        post_dist_detached = _get_dist(post_logits.detach())
-        prior_dist = _get_dist(prior_logits)
-        kl_dyn = torch.distributions.kl_divergence(post_dist_detached, prior_dist).sum(dim=-1)
-        loss_dyn = torch.maximum(kl_dyn, torch.ones_like(kl_dyn) * free_nats).mean()
-        
-        # L_rep: posterior || sg(prior)
-        post_dist = _get_dist(post_logits)
-        prior_dist_detached = _get_dist(prior_logits.detach())
-        kl_rep = torch.distributions.kl_divergence(post_dist, prior_dist_detached).sum(dim=-1)
-        loss_rep = torch.maximum(kl_rep, torch.ones_like(kl_rep) * free_nats).mean()
-        
-        return beta_dyn * loss_dyn + beta_rep * loss_rep
+        return {
+            'deter': torch.stack(deters, dim=1),
+            'stoch': torch.stack(stochs, dim=1),
+            'action': torch.stack(actions, dim=1)
+        }
 
 
 class ConvEncoder(nn.Module):
-    def __init__(self, input_channels=3, depth=48, stride=2):
+    def __init__(self, input_shape, config):
         super().__init__()
+        depth = config.get('depth', 48)
         self.net = nn.Sequential(
-            nn.Conv2d(input_channels, depth, 4, stride),
-            RMSNorm([depth, 31, 31]),
+            nn.Conv2d(input_shape[0], depth, 4, 2),
+            RMSNorm(depth),
             nn.SiLU(),
-            nn.Conv2d(depth, depth * 2, 4, stride),
-            RMSNorm([depth * 2, 14, 14]),
+            nn.Conv2d(depth, depth * 2, 4, 2),
+            RMSNorm(depth * 2),
             nn.SiLU(),
-            nn.Conv2d(depth * 2, depth * 4, 4, stride),
-            RMSNorm([depth * 4, 6, 6]),
+            nn.Conv2d(depth * 2, depth * 4, 4, 2),
+            RMSNorm(depth * 4),
             nn.SiLU(),
-            nn.Conv2d(depth * 4, depth * 8, 4, stride),
-            RMSNorm([depth * 8, 2, 2]),
+            nn.Conv2d(depth * 4, depth * 8, 4, 2),
+            RMSNorm(depth * 8),
             nn.SiLU()
         )
         
     def forward(self, obs):
-        x = self.net(obs)
-        return x.reshape(x.shape[0], -1)
+        # inputs: dict with image or tensor
+        if isinstance(obs, dict):
+            x = obs['image']
+        else:
+            x = obs
+            
+        # Ensure float and normalized to [-0.5, 0.5] if input is uint8
+        if x.dtype == torch.uint8:
+            x = x.float() / 255.0 - 0.5
+            
+        # x is [B, T, C, H, W]
+        B, T, C, H, W = x.shape
+        x = x.view(B*T, C, H, W)
+        y = self.net(x)
+        return y.reshape(B, T, -1)
 
 
-class ConvDecoder(nn.Module):
-    def __init__(self, input_dim, depth=48, output_channels=3):
+class Decoder(nn.Module):
+    def __init__(self, input_dim, shape, config):
         super().__init__()
-        self.linear = nn.Linear(input_dim, 32 * 1 * 1)
+        depth = config.get('depth', 48)
+        output_channels = shape[0]
+        
+        self.linear = nn.Linear(input_dim, 32 * depth)
         self.convs = nn.Sequential(
-            nn.ConvTranspose2d(32, depth * 4, 5, stride=2),
-            RMSNorm([depth * 4, 5, 5]),
+            nn.ConvTranspose2d(32 * depth, depth * 4, 5, 2),
+            RMSNorm(depth * 4),
             nn.SiLU(),
-            nn.ConvTranspose2d(depth * 4, depth * 2, 5, stride=2),
-            RMSNorm([depth * 2, 13, 13]),
+            nn.ConvTranspose2d(depth * 4, depth * 2, 5, 2),
+            RMSNorm(depth * 2),
             nn.SiLU(),
-            nn.ConvTranspose2d(depth * 2, depth, 6, stride=2),
-            RMSNorm([depth, 30, 30]),
+            nn.ConvTranspose2d(depth * 2, depth, 6, 2),
+            RMSNorm(depth),
             nn.SiLU(),
-            nn.ConvTranspose2d(depth, output_channels, 6, stride=2),
+            nn.ConvTranspose2d(depth, output_channels, 6, 2),
         )
 
     def forward(self, features):
-        x = self.linear(features)
-        x = x.view(x.shape[0], 32, 1, 1)
+        B, T, _ = features.shape
+        x = self.linear(features.view(B*T, -1))
+        x = x.view(x.shape[0], -1, 1, 1) 
         x = self.convs(x)
-        return torch.sigmoid(x)
-
-
-class SymexpTwohotMLP(nn.Module):
-    """MLP that outputs categorical distribution over symexp bins (paper Eq 10-11)."""
-    def __init__(self, input_dim, num_bins=255, hidden=512, layers=3):
-        super().__init__()
-        self.num_bins = num_bins
-        
-        model = []
-        for _ in range(layers):
-            model.append(nn.Linear(input_dim, hidden))
-            model.append(RMSNorm(hidden))
-            model.append(nn.SiLU())
-            input_dim = hidden
-        
-        # Output layer with zero initialization (paper p.6)
-        output_layer = nn.Linear(hidden, num_bins)
-        nn.init.zeros_(output_layer.weight)
-        nn.init.zeros_(output_layer.bias)
-        model.append(output_layer)
-        
-        self.net = nn.Sequential(*model)
-        self.register_buffer('bins', create_symexp_bins(num_bins=num_bins, device='cuda'))
-    
-    def forward(self, x):
-        """Returns logits for categorical distribution."""
-        return self.net(x)
-    
-    def predict(self, x):
-        """Returns predicted value as weighted average of bins."""
-        logits = self(x)
-        probs = F.softmax(logits, dim=-1)
-        return (probs * self.bins).sum(dim=-1)
-    
-    def loss(self, x, target):
-        """Compute twohot categorical cross entropy loss (paper Eq 11).
-        
-        Bins are in normal space (created as symexp(linspace(-20, 20))).
-        Target is in normal space (reward/return values).
-        No need to apply symlog to target since bins are already in symexp space.
-        """
-        logits = self(x)
-        # Bins are already in symexp space, target should be compared directly
-        target_encoded = twohot_encode(target, self.bins)
-        return -(target_encoded * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
+        return {'image': x.view(B, T, *x.shape[1:])}
 
 
 class MLP(nn.Module):
@@ -383,19 +412,27 @@ class MLP(nn.Module):
             input_dim = hidden
         model.append(nn.Linear(hidden, output_dim))
         self.net = nn.Sequential(*model)
-        self.dist = dist
     
     def forward(self, x):
         return self.net(x)
 
-
-class RMSNorm(nn.Module):
-    def __init__(self, dim, eps=1e-8):
+# Encoder with projection to specified embed_dim
+class Encoder(nn.Module):
+    def __init__(self, input_shape, config):
         super().__init__()
-        # If dim is int, convert to tensor; if list, convert to tensor
-        self.scale = nn.Parameter(torch.ones(dim))
-        self.eps = eps
+        self.cnn = ConvEncoder(input_shape, config)
+        
+        # Calculate CNN output size dynamically with a dummy forward pass
+        with torch.no_grad():
+            dummy_input = torch.zeros(1, 1, *input_shape)  # [B=1, T=1, C, H, W]
+            cnn_out = self.cnn(dummy_input)
+            cnn_out_size = cnn_out.shape[-1]
+        
+        # Project to desired embed_dim
+        self.embed_dim = config.get('embed_dim', 1024)
+        self.proj = nn.Linear(cnn_out_size, self.embed_dim)
+    
+    def forward(self, obs):
+        features = self.cnn(obs)  # [B, T, cnn_out_size]
+        return self.proj(features)  # [B, T, embed_dim]
 
-    def forward(self, x):
-        norm = torch.mean(x ** 2, dim=-1, keepdim=True)
-        return x * torch.rsqrt(norm + self.eps) * self.scale

@@ -350,7 +350,7 @@ def main():
             last_action[0].copy_(torch.from_numpy(act_data) if isinstance(act_data, np.ndarray) else act_data)
 
         t_env = time.time()
-        next_obs, reward, terminated, truncated, _ = env.step(env_action)
+        next_obs, reward, terminated, truncated, infos = env.step(env_action)
         timer['env_step'] = timer.get('env_step', 0) + (time.time() - t_env)
         
         if is_vectorized:
@@ -371,7 +371,25 @@ def main():
                     writer.add_scalar("episode/reward", ep_rew, num_episodes)
                     writer.add_scalar("episode/length", ep_len, num_episodes)
                     writer.add_scalar("episode/reward_avg100", avg_reward_100, num_episodes)
-                    log_metrics(step, {'episode_reward': ep_rew, 'episode_length': ep_len, 'episode': num_episodes, 'reward_avg100': avg_reward_100})
+                    
+                    metrics_to_log = {
+                        'episode_reward': ep_rew, 
+                        'episode_length': ep_len, 
+                        'episode': num_episodes, 
+                        'reward_avg100': avg_reward_100
+                    }
+                    
+                    # Log joint usage stats if available
+                    if 'episode' in infos[i]:
+                        for k, v in infos[i]['episode'].items():
+                            if k.startswith('joint_'):
+                                if isinstance(v, (list, np.ndarray)):
+                                    v = np.mean(v)
+                                writer.add_scalar(f"episode/{k}", v, num_episodes)
+                                metrics_to_log[k] = v
+                    
+                    # Skip JSON logging to avoid disk I/O overhead
+                    # log_metrics(step, metrics_to_log)
                     
                     if avg_reward is None:
                         avg_reward = ep_rew
@@ -408,7 +426,27 @@ def main():
                 writer.add_scalar("episode/reward", episode_reward, num_episodes)
                 writer.add_scalar("episode/length", episode_step, num_episodes)
                 writer.add_scalar("episode/reward_avg100", avg_reward_100, num_episodes)
-                log_metrics(step, {'episode_reward': episode_reward, 'episode_length': episode_step, 'episode': num_episodes, 'reward_avg100': avg_reward_100})
+                
+                metrics_to_log = {
+                    'episode_reward': episode_reward, 
+                    'episode_length': episode_step, 
+                    'episode': num_episodes, 
+                    'reward_avg100': avg_reward_100
+                }
+                
+                # Log joint usage stats if available
+                # In non-vectorized mode, infos is the single info dict
+                info = infos 
+                if 'episode' in info:
+                    for k, v in info['episode'].items():
+                        if k.startswith('joint_'):
+                            if isinstance(v, (list, np.ndarray)):
+                                v = np.mean(v)
+                            writer.add_scalar(f"episode/{k}", v, num_episodes)
+                            metrics_to_log[k] = v
+                
+                # Skip JSON logging to avoid disk I/O overhead
+                # log_metrics(step, metrics_to_log)
                 
                 if avg_reward is None:
                     avg_reward = episode_reward
@@ -484,23 +522,25 @@ def main():
                     )
                     losses = agent.train_step(batch.obs, batch.actions, batch.rewards, batch.dones)
                 
-                # Only log every 50 updates to reduce I/O overhead
-                if train_step_idx % 50 == 0:
+                # Only log every 500 updates to reduce I/O overhead and GPU sync
+                if train_step_idx % 500 == 0:
                     # Convert GPU tensors to scalars for logging
                     losses_scalar = {k: v.item() if isinstance(v, torch.Tensor) else v for k, v in losses.items()}
                     for name, loss in losses_scalar.items():
                         writer.add_scalar(f"train/{name}", loss, step + train_step_idx)
-                    log_metrics(step, {f'train/{k}': v for k, v in losses_scalar.items()})
+                    # Skip JSON logging during training to avoid disk I/O
+                    # log_metrics(step, {f'train/{k}': v for k, v in losses_scalar.items()})
             
-            # Use last losses for progress bar (convert to scalars)
-            losses_scalar = {k: v.item() if isinstance(v, torch.Tensor) else v for k, v in losses.items()}
-            pbar_dict = {k: f"{v:.3f}" for k, v in losses_scalar.items()}
-            if recent_rewards:
-                pbar_dict['avg_100ep'] = f"{np.mean(recent_rewards):.1f}"
-            if avg_reward is not None:
-                pbar_dict['ema'] = f"{avg_reward:.1f}"
-            pbar_dict['env_steps'] = f"{total_env_steps}"
-            pbar.set_postfix(pbar_dict)
+            # Use last losses for progress bar (convert to scalars) - only update every 10 steps
+            if step % 10 == 0:
+                losses_scalar = {k: v.item() if isinstance(v, torch.Tensor) else v for k, v in losses.items()}
+                pbar_dict = {k: f"{v:.3f}" for k, v in losses_scalar.items()}
+                if recent_rewards:
+                    pbar_dict['avg_100ep'] = f"{np.mean(recent_rewards):.1f}"
+                if avg_reward is not None:
+                    pbar_dict['ema'] = f"{avg_reward:.1f}"
+                pbar_dict['env_steps'] = f"{total_env_steps}"
+                pbar.set_postfix(pbar_dict)
             timer['train'] += time.time() - t0
             
             # Update last train counter

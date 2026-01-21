@@ -38,8 +38,12 @@ class DreamerV2Agent(Agent):
         # Actor outputs mean and log_std for continuous, or logits for discrete
         if is_discrete:
             self.actor = MLP(feature_dim, action_dim, hidden=400).to(device)
+            nn.init.zeros_(self.actor.net[-1].weight)
+            nn.init.zeros_(self.actor.net[-1].bias)
         else:
             self.actor_mean = MLP(feature_dim, action_dim, hidden=400).to(device)
+            nn.init.zeros_(self.actor_mean.net[-1].weight)
+            nn.init.zeros_(self.actor_mean.net[-1].bias)
             self.actor_log_std = nn.Parameter(torch.zeros(action_dim).to(device))
         
         self.critic = MLP(feature_dim, 1, hidden=400).to(device)
@@ -57,17 +61,19 @@ class DreamerV2Agent(Agent):
             list(self.decoder.parameters()) +
             list(self.reward_model.parameters()) +
             list(self.discount_model.parameters()),
-            lr=model_lr
+            lr=model_lr,
+            eps=1e-5
         )
         
         if is_discrete:
-            self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=actor_lr)
+            self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=actor_lr, eps=1e-5)
         else:
             self.actor_optimizer = optim.Adam(
                 list(self.actor_mean.parameters()) + [self.actor_log_std], 
-                lr=actor_lr
+                lr=actor_lr,
+                eps=1e-5
             )
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=value_lr)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=value_lr, eps=1e-5)
         
         self.scaler = torch.amp.GradScaler('cuda')
 
@@ -133,8 +139,6 @@ class DreamerV2Agent(Agent):
                     env_action = int(action_idx.item())
                     act_data = np.zeros(self.action_dim)
                     act_data[env_action] = 1.0
-                    act_data = np.zeros(self.action_dim)
-                    act_data[env_action] = 1.0
             else:
                 if len(obs_tensor) > 1:
                     env_action = action.cpu().numpy()
@@ -145,6 +149,9 @@ class DreamerV2Agent(Agent):
         return act_data, next_state, env_action
 
     def train_step(self, obs, action, reward, terminal):
+        if torch.isnan(obs).any():
+            obs = torch.nan_to_num(obs)
+            
         if obs.dtype == torch.uint8:
             obs = obs.float() / 255.0
             obs_target = obs - 0.5
@@ -187,6 +194,7 @@ class DreamerV2Agent(Agent):
             kl_scale = self.cfg['model'].get('kl_scale', 1.0)
             model_loss = loss_recon + loss_reward + loss_discount + kl_scale * loss_kl
         
+        # Clip Gradients to avoid explosions
         self.wm_optimizer.zero_grad()
         self.scaler.scale(model_loss).backward()
         self.scaler.unscale_(self.wm_optimizer)
@@ -237,7 +245,9 @@ class DreamerV2Agent(Agent):
                     entropy = action_dist.entropy().mean()
                 else:
                     mean = self.actor_mean(img_features[:, :-1])
+                    mean = torch.clamp(mean, -20.0, 20.0) # Safety Clamp
                     std = torch.exp(self.actor_log_std).expand_as(mean)
+                    std = torch.clamp(std, 1e-4, 10.0) # Safety Clamp
                     action_dist = torch.distributions.Normal(mean, std)
                     entropy = action_dist.entropy().sum(dim=-1).mean()
                     log_probs = torch.zeros_like(advantage)
@@ -309,7 +319,12 @@ class DreamerV2Agent(Agent):
         """Update target critic every 100 gradient steps"""
         self._updates += 1
         if self._updates % 100 == 0:
-            self.target_critic.load_state_dict(self.critic.state_dict())
+            # Protect against NaNs propagating to target
+            state_dict = self.critic.state_dict()
+            for k, v in state_dict.items():
+                if torch.isnan(v).any():
+                    return # Skip update if any param is NaN
+            self.target_critic.load_state_dict(state_dict)
 
     def save(self, path, logs=None):
         data = {

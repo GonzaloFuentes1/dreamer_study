@@ -3,7 +3,7 @@
 env: "dm_control/walker-walk-v0"
 device: "cuda"
 action_repeat: 2
-num_envs: 4
+num_envs: 16
 
 # Async Processing
 use_async: true
@@ -51,6 +51,6 @@ buffer:
 
 # Logging
 logging:
-  eval_interval: 10000
+  eval_interval: 2000
   save_interval: 10000
   video_interval: 10000

@@ -83,6 +83,7 @@ class DMCtoGymWrapper(gym.Env):
         self.recorder = None
         self.video_path = None
         self.frames = []
+        self.episode_actions = []
 
         # Define action and observation space based on the DMC environment
         action_spec = self.env.action_spec()
@@ -108,6 +109,10 @@ class DMCtoGymWrapper(gym.Env):
         termination = False
         truncation = False
         
+        # Track joint usage (absolute magnitude)
+        if hasattr(self, 'episode_actions'):
+            self.episode_actions.append(np.array(action).flatten())
+        
         for _ in range(self.action_repeat):
             time_step = self.env.step(action)
             r = time_step.reward if time_step.reward is not None else 0
@@ -126,10 +131,20 @@ class DMCtoGymWrapper(gym.Env):
         
         info = {}
         if termination or truncation:
+            # Calculate action statistics per joint
+            action_stats = {}
+            if hasattr(self, 'episode_actions') and len(self.episode_actions) > 0:
+                actions_stacked = np.stack(self.episode_actions)
+                # Mean Absolute Value per joint
+                usage = np.mean(np.abs(actions_stacked), axis=0)
+                # Add to stats as lists (for aggregation compatibility)
+                action_stats = {f'joint_{i}_usage': [u] for i, u in enumerate(usage)}
+                
             info = {
                 'episode': {
                     'r': [self.total_reward],
-                    'l': self.current_step
+                    'l': self.current_step,
+                    **action_stats
                 }
             }
             
@@ -149,6 +164,7 @@ class DMCtoGymWrapper(gym.Env):
         self.total_reward = 0
         self.episode_count += 1
         self.frames = []
+        self.episode_actions = []
         
         # DM Control suite handles seeding at load time usually.
         time_step = self.env.reset()
