@@ -1,17 +1,38 @@
-torch
-torchvision
-gymnasium[classic_control,atari,accept-rom-license,box2d,mujoco]
-numpy
-tensorboard
-ruamel.yaml
-addict
-pytorch_optimizer
-tqdm
-swig
-dm_control
-mujoco
-shimmy
-opencv-python
-moviepy
-matplotlib
-pandas
+# Core dependencies - install first
+numpy==2.2.6
+torch==2.10.0
+torchvision==0.25.0
+
+# RL frameworks and environments
+gymnasium==1.2.3
+dm-control==1.0.36
+mujoco==3.4.0
+shimmy==2.0.0
+
+# Gymnasium extras (classic control, atari, box2d)
+ale-py==0.11.2
+Box2D==2.3.10
+
+# Utils and optimization
+ruamel.yaml==0.19.1
+PyYAML==6.0.3
+addict==2.4.0
+pytorch_optimizer==3.9.0
+tqdm==4.67.1
+
+# Logging and visualization
+tensorboard==2.20.0
+matplotlib==3.10.8
+pandas==2.3.3
+
+# Media processing
+opencv-python==4.13.0.90
+moviepy==2.2.1
+imageio==2.37.2
+imageio-ffmpeg==0.6.0
+pillow==11.3.0
+
+# Additional dependencies
+python-dotenv==1.2.1
+requests==2.32.5
+scipy==1.15.3
