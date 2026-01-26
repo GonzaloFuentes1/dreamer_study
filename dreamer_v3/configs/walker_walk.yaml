@@ -1,60 +1,93 @@
-# DreamerV3: DMC Walker Walk (Continuous Control)
+# Dreamer V3 Walker Walk Configuration
 # Paper: Mastering Diverse Domains through World Models (Hafner et al., 2023)
-# Hyperparameters from Table 4
+# Merged from: common.yaml + dreamer_v3.yaml
+# Key: Improved architectures (RMSNorm, BlockLinear), LaProp optimizer
+
 env: "dm_control/walker-walk-v0"
 device: "cuda"
-continuous_actions: true
 action_repeat: 2
 num_envs: 16
 
-# Async Processing
+# Async & GPU Optimization
 use_async: true
 use_prefetch: false
+pin_memory: true
+mixed_precision: true
+cudnn_benchmark: true
+tf32: true
+compile_model: false
 
-# Training Schedule (Table 4)
+# Training Schedule (DMC)
 training:
   total_steps: 1000000
-  initial_episodes: 5
-  train_every: 4
-  train_steps: 2  # Ratio 512: (16*64*2)/4 = 512
-  batch_size: 16  # Paper Table 4: batch_size = 16
-  seq_length: 64  # Paper Table 4: batch_length = 64
+  initial_episodes: 10
+  train_every: 5
+  train_steps: 1
+  batch_size: 16
+  seq_length: 64
 
-# World Model (Table 4)
+# World Model
 model:
   embed_dim: 1024
-  cnn_depth: 16    # Base channels (d/16). 16=12M, 32=50M, 48=100M
-  mlp_width: 256   # Hidden size (d). 256=12M, 512=50M, 768=100M
-  lr: 0.00004  # Paper Table 4: 4e-5 (unified learning rate)
-  kl_free_nats: 1.0  # Paper Table 4: Free nats = 1
-  beta_pred: 1.0  # Reconstruction loss scale
-  beta_dyn: 1.0  # Dynamics loss scale
-  beta_rep: 0.1  # Representation loss scale (Table 4)
+  grayscale: false
+  lr: 1e-4
+  kl_free_nats: 1.0
+  beta_pred: 1.0
+  beta_dyn: 0.5
+  beta_rep: 0.1
   rssm:
-    stoch_dim: 32
-    stoch_classes: 32 # 50M Model: d=512 -> classes=32
-    deter_dim: 1024   # Increased recurrent capacity
-    hidden_dim: 256   # 50M Model: d=512
+    deter_dim: 1024
+    hidden_dim: 1024
+    use_rms_norm: true
+    use_block_linear: true
+    min_std: 0.1
 
-# Actor (Table 4)
+# Actor (Policy)
 actor:
-  horizon: 15  # Paper Table 4: H = 15
-  entropy_coef: 0.0003  # Paper Table 4: η = 3×10⁻⁴
+  lr: 3e-5
+  horizon: 15
+  entropy_coef: 3e-4
+  std_min: 0.1
+  std_max: 1.0
+  use_stop_gradient: true
 
-# Critic (Table 4)
+# Critic (Value Function)
 critic:
-  gamma: 0.997  # Paper Table 4: 1/(1-γ) = 333 → γ = 0.997
-  lambda: 0.95  # Paper Table 4: λ = 0.95
-  beta_val: 1.0  # Imagination loss scale
-  beta_repval: 0.3  # Replay loss scale (Table 4)
-  ema_decay: 0.98  # EMA regularizer decay (Table 4)
+  lr: 3e-5
+  gamma: 0.997
+  lambda_: 0.95
+  slow_target_fraction: 0.02
 
 # Replay Buffer
 buffer:
-  capacity: 1000000  # Reduced to 1M (approx 12GB RAM)
+  capacity: 1000000
 
 # Logging
 logging:
   eval_interval: 2000
-  save_interval: 50000
-  video_interval: 50000
+  save_interval: 2000
+  video_interval: 2000
+
+# Algorithm Settings
+algorithm:
+  imagination_horizon: 15
+  optimizer: "laprop"
+  gradient_clip_norm: 100.0
+  laprop_beta1: 0.9
+  laprop_beta2: 0.999
+  laprop_epsilon: 1e-8
+
+
+# Optimizer
+optimizer:
+  grad_clip: 100
+  use_agc: true
+  agc_clip: 0.3
+  adam_eps: 1e-8
+  weight_decay: 0
+
+# Logging
+logging:
+  eval_interval: 25000
+  save_interval: 25000
+  video_interval: 25000

@@ -5,65 +5,15 @@ import torch.distributions as td
 import torch.optim as optim
 import numpy as np
 import copy
-from . import models
 
-def symlog(x):
-    return torch.sign(x) * torch.log(torch.abs(x) + 1.0)
+try:
+    import pytorch_optimizer as optim_plus
+except ImportError:
+    optim_plus = None
 
-def symexp(x):
-    return torch.sign(x) * (torch.exp(torch.abs(x)) - 1.0)
+from .models import WorldModel, ActorModel, CriticModel
+from .utils import adaptive_gradient_clip, twohot_loss
 
-def adaptive_gradient_clip(parameters, clip=0.3, pmin=1e-3):
-    """
-    Adaptive Gradient Clipping (AGC) as used in DreamerV3.
-    Clips gradients based on parameter norms rather than global gradient norm.
-    
-    For each parameter:
-        clip_value = clip * max(pmin, ||param||)
-        if ||grad|| > clip_value:
-            grad = grad * (clip_value / ||grad||)
-    
-    Args:
-        parameters: Model parameters with gradients
-        clip: Clipping factor (default 0.3 as in paper)
-        pmin: Minimum parameter norm (default 1e-3)
-    
-    Returns:
-        dict with statistics: avg_norm, max_norm, num_clipped
-    """
-    if clip <= 0:
-        return {'avg_norm': 0.0, 'max_norm': 0.0, 'num_clipped': 0}
-    
-    grad_norms = []
-    num_clipped = 0
-    
-    for param in parameters:
-        if param.grad is None:
-            continue
-        
-        # Flatten for norm computation
-        grad_flat = param.grad.detach().flatten()
-        param_flat = param.detach().flatten()
-        
-        # Compute norms
-        grad_norm = torch.linalg.norm(grad_flat, ord=2)
-        param_norm = torch.linalg.norm(param_flat, ord=2)
-        
-        grad_norms.append(grad_norm.item())
-        
-        # Compute adaptive clip threshold
-        max_norm = clip * torch.maximum(param_norm, torch.tensor(pmin, device=param.device))
-        
-        # Clip if necessary
-        if grad_norm > max_norm:
-            param.grad.mul_(max_norm / grad_norm)
-            num_clipped += 1
-    
-    return {
-        'avg_norm': sum(grad_norms) / max(len(grad_norms), 1),
-        'max_norm': max(grad_norms) if grad_norms else 0.0,
-        'num_clipped': num_clipped
-    }
 
 class DreamerV3Agent(nn.Module):
     def __init__(self, config, obs_shape, action_dim, is_discrete, device):
@@ -73,64 +23,46 @@ class DreamerV3Agent(nn.Module):
         self.obs_shape = obs_shape
         self.action_dim = action_dim
         self.is_discrete = is_discrete
-        self.continuous_actions = config.get('continuous_actions', False)
         self.num_bins = 255
 
-        # Prepare configs
+        # Add device to config for WorldModel
+        config['device'] = device
+        
+        # World Model (contains encoder, decoder, RSSM, reward, continue)
+        self.world_model = WorldModel(obs_shape, action_dim, config).to(self.device)
+        
+        # Get feature dimension from world model's RSSM
+        feat_dim = self.world_model.rssm.deter + self.world_model.rssm.stoch * self.world_model.rssm.classes
+        
+        # Actor Critic (Paper: 5 layers, 640 units, critic uses twohot)
         model_cfg = config['model']
-        rssm_cfg = model_cfg['rssm'].copy()
-        if 'embed_dim' in model_cfg:
-            rssm_cfg['embed_dim'] = model_cfg['embed_dim']
-            
-        enc_cfg = model_cfg.get('encoder', model_cfg.copy())
-        if 'cnn_depth' in model_cfg:
-            enc_cfg['depth'] = model_cfg['cnn_depth']
-            
-        dec_cfg = model_cfg.get('decoder', model_cfg.copy())
-        if 'cnn_depth' in model_cfg:
-            dec_cfg['depth'] = model_cfg['cnn_depth']
+        mlp_hidden = model_cfg.get('mlp_hidden', 640)
+        mlp_layers = model_cfg.get('mlp_layers', 5)
         
-        # Effective action dim for the model
-        if self.continuous_actions:
-             model_action_dim = self.action_dim
-        elif self.is_discrete:
-             model_action_dim = self.action_dim
-        else:
-             model_action_dim = self.action_dim * self.num_bins
-        
-        # Initialize RSSM
-        self.rssm = models.RSSM(model_action_dim, config=rssm_cfg).to(self.device)
-        
-        # Initialize Encoder
-        self.encoder = models.Encoder(obs_shape, config=enc_cfg).to(self.device)
-        
-        # Initialize Decoder
-        feat_dim = self.rssm.deter + self.rssm.stoch * self.rssm.classes
-        self.decoder = models.Decoder(feat_dim, shape=obs_shape, config=dec_cfg).to(self.device)
-        
-        # Heads
-        self.reward_head = models.MLP(feat_dim, 1, self.rssm.hidden, layers=2).to(self.device)
-        self.cont_head = models.MLP(feat_dim, 1, self.rssm.hidden, layers=2).to(self.device)
-        
-        # Actor Critic
-        if self.continuous_actions:
-             actor_output_dim = self.action_dim * 2
-        elif self.is_discrete:
-             actor_output_dim = self.action_dim
-        else:
-             actor_output_dim = self.action_dim * self.num_bins
-
-        self.actor = models.MLP(feat_dim, actor_output_dim, self.rssm.hidden, layers=2).to(self.device)
-        self.critic = models.MLP(feat_dim, 1, self.rssm.hidden, layers=2).to(self.device)
+        self.actor = ActorModel(feat_dim, action_dim, hidden=mlp_hidden, layers=mlp_layers, is_discrete=is_discrete).to(self.device)
+        self.critic = CriticModel(feat_dim, hidden=mlp_hidden, layers=mlp_layers, device=self.device).to(self.device)
         self.slow_critic = copy.deepcopy(self.critic).to(self.device)
         
-        # Optimizer settings: use config lr if provided, else paper default 3e-4
-        # Note: walker_walk.yaml specifies 4e-5 which is also valid
-        lr = config.get('model', {}).get('lr', config['training'].get('lr', 3e-4))
-        self.opt = optim.Adam(self.parameters(), lr=lr, eps=1e-8)
+        # Optimizer settings: V3 paper uses LaProp with eps=1e-20
+        lr = float(config.get('model', {}).get('lr', config['training'].get('lr', 3e-4)))
+        
+        # Try LaProp first (V3 default), fallback to Adam
+        if optim_plus is not None:
+            try:
+                print("Using LaProp optimizer (V3 default)")
+                self.opt = optim_plus.LaProp(self.parameters(), lr=lr, eps=1e-20)
+            except AttributeError:
+                print("LaProp not available, using Adam")
+                self.opt = optim.Adam(self.parameters(), lr=lr, eps=1e-8)
+        else:
+            print("pytorch_optimizer not installed, using Adam")
+            self.opt = optim.Adam(self.parameters(), lr=lr, eps=1e-8)
         
         # EMA decay for slow critic
         self.ema_decay = config.get('critic', {}).get('ema_decay', 0.98)
+        
+        # Return normalization scale (EMA, paper eq. 7)
+        self.register_buffer('return_scale', torch.ones(1, device=self.device))
 
     def policy(self, obs, state, last_action, mode='train'):
         # obs: tensor or numpy
@@ -147,7 +79,7 @@ class DreamerV3Agent(nn.Module):
         B = obs.shape[0]
         # Handle initial state
         if state is None or (isinstance(state, tuple) and len(state) == 0):
-            stoch_flat, deter = self.rssm.initial(B, obs.device)
+            stoch_flat, deter = self.world_model.rssm.initial(B, obs.device)
         else:
             stoch_flat, deter = state
             # ALWAYS force to match current batch size B (no conditionals)
@@ -159,61 +91,52 @@ class DreamerV3Agent(nn.Module):
         last_action = last_action[:B].contiguous()
         
         # Encoder expect (B, T, ...) so unsqueeze time
-        embed = self.encoder(dict(image=obs.unsqueeze(1))) # (B, 1, E)
+        embed = self.world_model.encoder(dict(image=obs.unsqueeze(1))) # (B, 1, E)
         
         # RSSM Step
         # 1. Deterministic step
         inp = torch.cat([stoch_flat, last_action], dim=-1)
-        x = self.rssm.img_in(inp)
-        deter = self.rssm.cell(x, deter)
+        x = self.world_model.rssm.img_in(inp)
+        deter = self.world_model.rssm.cell(x, deter)
         
         # 2. Posterior (Observe)
         obs_inp = torch.cat([deter, embed.squeeze(1)], dim=-1)
-        post_logit = self.rssm.obs_out(obs_inp)  # Keep flat for get_dist
+        post_logit = self.world_model.rssm.obs_out(obs_inp)  # Keep flat for get_dist
         
         # Sample
         if mode == 'train':
-            dist = self.rssm.get_dist(post_logit)
+            dist = self.world_model.rssm.get_dist(post_logit)
             stoch = dist.sample() + dist.probs - dist.probs.detach()
         else:
             # For eval, reshape manually then argmax
-            post_logit_shaped = post_logit.view(B, self.rssm.stoch, self.rssm.classes)
-            stoch = F.one_hot(torch.argmax(post_logit_shaped, dim=-1), self.rssm.classes).float()
+            post_logit_shaped = post_logit.view(B, self.world_model.rssm.stoch, self.world_model.rssm.classes)
+            stoch = F.one_hot(torch.argmax(post_logit_shaped, dim=-1), self.world_model.rssm.classes).float()
             
         stoch_flat = stoch.view(B, -1)
         
         # Feature for Actor
         feat = torch.cat([deter, stoch_flat], dim=-1)
         
-        # Actor
-        logits = self.actor(feat)
+        # Actor - now uses ActorModel
+        dist = self.actor.get_distribution(feat)
         
-        if self.continuous_actions:
-            mean, std = torch.chunk(logits, 2, dim=-1)
-            mean = torch.tanh(mean)
-            std = F.softplus(std) + 0.1
-            base_dist = td.Normal(mean, std)
-            dist = td.Independent(td.TransformedDistribution(base_dist, td.TanhTransform(cache_size=1)), 1)
+        if not self.is_discrete:
+            # Continuous actions
             if mode == 'train':
                 action = dist.rsample()
             else:
-                action = torch.tanh(mean)  # No exploration in eval
+                action = torch.tanh(dist.mean)  # No exploration in eval
             env_action = action.detach().cpu().numpy()
             
         else:
-            # Discrete actions - add exploration noise in training
+            # Discrete actions
             if mode == 'train':
-                # Add small uniform noise for exploration (as in paper)
-                logits_with_noise = logits
-                dist = torch.distributions.OneHotCategorical(logits=logits_with_noise)
                 action = dist.sample()
             else:
-                action_idx = torch.argmax(logits, dim=-1)
-                action = F.one_hot(action_idx, logits.shape[-1]).float()
+                action_idx = torch.argmax(dist.logits, dim=-1)
+                action = F.one_hot(action_idx, self.action_dim).float()
             
-            env_action = action.detach().cpu().numpy()
-            if self.is_discrete:
-                env_action = np.argmax(env_action, axis=-1)
+            env_action = np.argmax(action.detach().cpu().numpy(), axis=-1)
             
         next_state = (stoch_flat, deter)
         
@@ -225,25 +148,27 @@ class DreamerV3Agent(nn.Module):
         # actions: (B, T, A)
         
         # 1. Encode
-        embed = self.encoder(dict(image=obs))
+        embed = self.world_model.encoder(dict(image=obs))
         
         # 2. Observe
-        state = self.rssm.initial(obs.shape[0], self.device)
-        post = self.rssm.observe(embed, actions, state)
+        state = self.world_model.rssm.initial(obs.shape[0], self.device)
+        post = self.world_model.rssm.observe(embed, actions, state)
         
         feat = torch.cat([post['deter'], post['stoch'].flatten(2)], dim=-1)
         
-        # 3. WM Loss
-        recon = self.decoder(feat)
-        target_img = obs.float() / 255.0 - 0.5
-        
+        # 3. WM Loss (Paper eq. 2-3)
+        recon = self.world_model.decoder(feat)
+        # Decoder: V3 uses sigmoid [0,1] output, MSE loss
+        target_img = obs.float() / 255.0
         loss_img = F.mse_loss(recon['image'], target_img)
         
-        pred_rew = self.reward_head(feat).squeeze(-1)
-        loss_rew = F.mse_loss(pred_rew, symlog(rewards.squeeze(-1).float()))
+        # Reward: Symexp twohot loss (paper eq. 10-11)
+        reward_logits = self.world_model.reward_model(feat)
+        loss_rew = twohot_loss(reward_logits, rewards.squeeze(-1).float(), self.world_model.reward_model.bins)
         
-        pred_cont = self.cont_head(feat).squeeze(-1)
-        loss_cont = F.binary_cross_entropy_with_logits(pred_cont, (1.0 - dones.squeeze(-1).float()))
+        # Continue: Binary classification via logistic regression
+        cont_logits = self.world_model.continue_model(feat).squeeze(-1)
+        loss_cont = F.binary_cross_entropy_with_logits(cont_logits, (1.0 - dones.squeeze(-1).float()))
         
         # KL
         prior_logits = post['prior_logit']
@@ -261,7 +186,10 @@ class DreamerV3Agent(nn.Module):
         kl_value_rep = kl_cat_sum(post_logits, prior_logits.detach())
         loss_rep = torch.mean(torch.maximum(kl_value_rep, torch.tensor(1.0, device=self.device)))
         
-        loss_wm = loss_img + loss_rew + loss_cont + 0.5 * loss_dyn + 0.1 * loss_rep
+        # Paper eq. 2: L = βpred*Lpred + βdyn*Ldyn + βrep*Lrep
+        # βpred=1, βdyn=1, βrep=0.1
+        # Lpred = loss_img + loss_rew + loss_cont
+        loss_wm = loss_img + loss_rew + loss_cont + loss_dyn + 0.1 * loss_rep
         
         # Check for NaN in world model losses before proceeding to actor
         if torch.isnan(loss_wm) or torch.isinf(loss_wm):
@@ -271,45 +199,37 @@ class DreamerV3Agent(nn.Module):
             return {k: 0.0 for k in ['wm_loss', 'actor_loss', 'critic_loss', 'recon_loss', 'reward_loss', 'cont_loss', 'kl_dyn_loss', 'kl_rep_loss']}
         
         # 4. Actor Critic
-        if self.continuous_actions:
+        if not self.is_discrete:
             # Continuous Control (Dynamics Backprop)
             B, T, _ = feat.shape
             flat_deter = post['deter'].detach().reshape(B*T, -1)
-            flat_stoch = post['stoch'].detach().reshape(B*T, self.rssm.stoch, self.rssm.classes)
+            flat_stoch = post['stoch'].detach().reshape(B*T, self.world_model.rssm.stoch, self.world_model.rssm.classes)
             start_state = {'deter': flat_deter, 'stoch': flat_stoch}
-
-            def imag_policy_cont(feat):
-                logits = self.actor(feat)
-                mean, std = torch.chunk(logits, 2, dim=-1)
-                mean = torch.tanh(mean)
-                std = F.softplus(std) + 0.1
-                base_dist = td.Normal(mean, std)
-                dist = td.Independent(td.TransformedDistribution(base_dist, td.TanhTransform(cache_size=1)), 1)
+            
+            def imag_policy(feat):
+                dist = self.actor.get_distribution(feat)
                 return dist.rsample()
-
-            imag_outs = self.rssm.imagine(imag_policy_cont, start_state, horizon=15)
+            
+            imag_outs = self.world_model.rssm.imagine(imag_policy, start_state, horizon=16)
             imag_feat = torch.cat([imag_outs['deter'], imag_outs['stoch'].flatten(2)], dim=-1)
             
-            # Predict in Symlog space
-            imag_rew_sym = self.reward_head(imag_feat).squeeze(-1)
-            imag_val_sym = self.critic(imag_feat).squeeze(-1) # Online critic
-            
-            # Denormalize for Return Calculation (Use slow critic for bootstrapping if desired, or online)
-            # Typically Dreamer uses slow_critic for the target calculation
+            # Predict rewards and values using twohot models
             with torch.no_grad():
-                 imag_val_slow_sym = self.slow_critic(imag_feat).squeeze(-1)
-                 
-                 imag_rew = symexp(imag_rew_sym)
-                 imag_val = symexp(imag_val_slow_sym)
-            
-            imag_cont_logits = self.cont_head(imag_feat).squeeze(-1)
-            imag_cont = torch.sigmoid(imag_cont_logits)
+                # Reward prediction (expected value from categorical distribution)
+                imag_rew = self.world_model.reward_model.predict(imag_feat)
+                
+                # Continue prediction
+                imag_cont_logits = self.world_model.continue_model(imag_feat).squeeze(-1)
+                imag_cont = torch.sigmoid(imag_cont_logits)
+                
+                # Value prediction from slow critic (expected value from categorical)
+                imag_val = self.slow_critic.predict(imag_feat)
             
             # Lambda return parameters from config (or paper defaults)
             lambda_ = self.cfg.get('critic', {}).get('lambda', 0.95)
             discount = self.cfg.get('critic', {}).get('gamma', 0.997)
             
-            # Lambda-return calculation (in Domain Space)
+            # Lambda-return calculation
             returns_list = []
             next_val = imag_val[:, -1]
             
@@ -322,90 +242,92 @@ class DreamerV3Agent(nn.Module):
             returns_list.reverse()
             returns = torch.stack(returns_list, dim=1)
             
-            # Re-normalize returns for Critic Loss (Target)
-            returns_sym = symlog(returns)
-            
-            # Entropy
-            actor_logits = self.actor(imag_feat)
-            mean, std = torch.chunk(actor_logits, 2, dim=-1)
-            mean = torch.tanh(mean)
-            std = F.softplus(std) + 0.1
-            base_dist = td.Normal(mean, std)
-            dist = td.Independent(td.TransformedDistribution(base_dist, td.TanhTransform(cache_size=1)), 1)
+            # Actor loss with return normalization (paper eq. 6-7)
+            dist = self.actor.get_distribution(imag_feat)
             log_prob = dist.log_prob(imag_outs['action'])
+            entropy = dist.entropy() if hasattr(dist, 'entropy') else torch.zeros_like(log_prob)
             
-            # Loss
-            # DreamerV3: Return Normalization (Shift/Scale)
-            # Use percentiles stats from the current batch for stability
-            # Scale = P95 - P05
+            # EMA return normalization scale (paper eq. 7)
             return_flat = returns.reshape(-1)
-            # Using torch.quantile requires a moderately large batch. With 16x64=1024 we are safe.
-            p95 = torch.quantile(return_flat, 0.95)
-            p05 = torch.quantile(return_flat, 0.05)
-            scale = torch.maximum(p95 - p05, torch.tensor(1.0, device=self.device))
-            offset = p05
+            with torch.no_grad():
+                p95 = torch.quantile(return_flat, 0.95)
+                p05 = torch.quantile(return_flat, 0.05)
+                batch_scale = torch.maximum(p95 - p05, torch.tensor(1.0, device=self.device))
+                # Update EMA: S = EMA[Per95 - Per05, 0.99]
+                self.return_scale.mul_(0.99).add_(batch_scale * 0.01)
             
-            # Normalize returns for Actor (keeping linearity/unbiased)
-            norm_returns = (returns - offset) / scale
+            # Normalize returns with max(1, S) to avoid amplifying noise under sparse rewards
+            scale = torch.maximum(torch.tensor(1.0, device=self.device), self.return_scale)
+            norm_returns = returns / scale
             
-            loss_actor = -torch.mean(norm_returns + 3e-4 * log_prob) 
+            # Paper eq. 6: entropy scale η = 3e-4
+            loss_actor = -torch.mean(norm_returns * log_prob + 3e-4 * entropy)
             
-            loss_critic = F.mse_loss(imag_val_sym, returns_sym.detach())
+            # Critic loss: twohot categorical cross-entropy (paper page 5-6)
+            critic_logits = self.critic(imag_feat)
+            loss_critic = twohot_loss(critic_logits, returns.detach(), self.critic.bins)
 
         else:
             # Discrete / Binning (REINFORCE / Straight-Through)
             with torch.no_grad():
                 B, T, _ = feat.shape
                 flat_deter = post['deter'].reshape(B*T, -1)
-                flat_stoch = post['stoch'].reshape(B*T, self.rssm.stoch, self.rssm.classes)
+                flat_stoch = post['stoch'].reshape(B*T, self.world_model.rssm.stoch, self.world_model.rssm.classes)
                 start_state = {'deter': flat_deter, 'stoch': flat_stoch}
 
             def imag_policy(feat):
-                logits = self.actor(feat)
-                dist = torch.distributions.OneHotCategorical(logits=logits)
+                dist = self.actor.get_distribution(feat)
                 sample = dist.sample()
                 probs = dist.probs
                 # Straight-through estimator
                 action = (sample - probs).detach() + probs
                 return action
 
-            imag_outs = self.rssm.imagine(imag_policy, start_state, horizon=15)
+            imag_outs = self.world_model.rssm.imagine(imag_policy, start_state, horizon=16)
             imag_feat = torch.cat([imag_outs['deter'], imag_outs['stoch'].flatten(2)], dim=-1)
             
             with torch.no_grad():
-                 imag_rew = self.reward_head(imag_feat).squeeze(-1)
-                 imag_cont_logits = self.cont_head(imag_feat).squeeze(-1)
-                 imag_cont = torch.sigmoid(imag_cont_logits)
-                 imag_val = self.slow_critic(imag_feat).squeeze(-1)
+                # Predict rewards and values using twohot models
+                imag_rew = self.world_model.reward_model.predict(imag_feat)
+                imag_cont_logits = self.world_model.continue_model(imag_feat).squeeze(-1)
+                imag_cont = torch.sigmoid(imag_cont_logits)
+                imag_val = self.slow_critic.predict(imag_feat)
                  
-                 # Lambda return parameters from config (or paper defaults)
-                 lambda_ = self.cfg.get('critic', {}).get('lambda', 0.95)
-                 discount = self.cfg.get('critic', {}).get('gamma', 0.997)
+                # Lambda return parameters from config (or paper defaults)
+                lambda_ = self.cfg.get('critic', {}).get('lambda', 0.95)
+                discount = self.cfg.get('critic', {}).get('gamma', 0.997)
                  
-                 returns = torch.zeros_like(imag_rew)
-                 next_val = imag_val[:, -1]
+                returns = torch.zeros_like(imag_rew)
+                next_val = imag_val[:, -1]
                  
-                 for t in reversed(range(imag_rew.shape[1])):
-                     # DreamerV2/V3 style return calculation
-                     # Based on Hafner's code: ret = rew + disc * (1-lambda) * val + disc * lambda * next_val
-                     # disc is gamma * pcont
-                     disc = discount * imag_cont[:, t]
-                     returns[:, t] = imag_rew[:, t] + disc * (1 - lambda_) * imag_val[:, t] + disc * lambda_ * next_val
-                     next_val = returns[:, t]
-                     
-            actor_logits = self.actor(imag_feat.detach())
-            dist = torch.distributions.OneHotCategorical(logits=actor_logits)
-            
-            # Entropy regularization (critical for preventing collapse)
+                for t in reversed(range(imag_rew.shape[1])):
+                    disc = discount * imag_cont[:, t]
+                    returns[:, t] = imag_rew[:, t] + disc * (1 - lambda_) * imag_val[:, t] + disc * lambda_ * next_val
+                    next_val = returns[:, t]
+                    
+            # Actor loss with return normalization
+            dist = self.actor.get_distribution(imag_feat.detach())
             entropy = dist.entropy()
             log_prob = dist.log_prob(imag_outs['action'])
             
-            # Actor loss: maximize return + entropy bonus (from config or paper default 3e-4)
-            entropy_coef = self.cfg.get('actor', {}).get('entropy_coef', 3e-4)
-            loss_actor = -torch.mean(returns * log_prob + entropy_coef * entropy)
+            # EMA return normalization scale (paper eq. 7)
+            return_flat = returns.reshape(-1)
+            with torch.no_grad():
+                p95 = torch.quantile(return_flat, 0.95)
+                p05 = torch.quantile(return_flat, 0.05)
+                batch_scale = torch.maximum(p95 - p05, torch.tensor(1.0, device=self.device))
+                # Update EMA
+                self.return_scale.mul_(0.99).add_(batch_scale * 0.01)
             
-            pred_val = self.critic(imag_feat.detach()).squeeze(-1)
-            loss_critic = F.mse_loss(pred_val, returns)
+            scale = torch.maximum(torch.tensor(1.0, device=self.device), self.return_scale)
+            norm_returns = returns / scale
+            
+            # Actor loss: maximize return + entropy bonus (η = 3e-4)
+            loss_actor = -torch.mean(norm_returns * log_prob + 3e-4 * entropy)
+            
+            # Critic loss: twohot categorical cross-entropy
+            critic_logits = self.critic(imag_feat.detach())
+            loss_critic = twohot_loss(critic_logits, returns, self.critic.bins)
         
         loss_total = loss_wm + loss_actor + loss_critic
         

@@ -3,28 +3,22 @@ import pathlib
 import os
 import sys
 
-# Parse GPU argument BEFORE any imports that use CUDA/EGL
-# This ensures CUDA_VISIBLE_DEVICES is set before dm_control initializes EGL
 parser = argparse.ArgumentParser()
 parser.add_argument("--version", type=str, default="v1")
 parser.add_argument("--exp", type=str, default="default")
 parser.add_argument("--env", type=str, default=None, help="Override env id from config")
-parser.add_argument("--gpu", type=str, default="0")
+parser.add_argument("--gpu", type=str, default="0", help="GPU id to use, or -1 for CPU")
 parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint.pt to resume")
 args = parser.parse_args()
 
-# Set GPU BEFORE importing dm_control (which initializes EGL)
-os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
-
-# Configure MuJoCo rendering
+# Only set CUDA_VISIBLE_DEVICES if not forcing CPU mode
+if args.gpu != "-1":
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
 os.environ['MUJOCO_GL'] = 'egl'
 os.environ['__NV_PRIME_RENDER_OFFLOAD'] = '1'
 os.environ['__GLX_VENDOR_LIBRARY_NAME'] = 'nvidia'
-
-# PyTorch optimizations
 os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
 
-# Safe to import everything else
 import torch
 import numpy as np
 import datetime
@@ -37,8 +31,9 @@ from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 
 torch.backends.cudnn.benchmark = True
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 
-# Add project root to sys.path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from envs.wrappers import make_env, AsyncVectorEnv
@@ -47,7 +42,7 @@ from common.buffer_parallel import ParallelReplayBuffer
 from common.prefetch_buffer import PrefetchBuffer
 from dreamer_v1.agent import DreamerV1Agent
 from dreamer_v2.agent import DreamerV2Agent
-from dreamer_v3.agent import DreamerV3Agent
+# from dreamer_v3.agent import DreamerV3Agent  # TODO: Fix imports
 
 def load_config(version, exp_name):
     yaml = YAML(typ='safe')
@@ -56,77 +51,188 @@ def load_config(version, exp_name):
         raise FileNotFoundError(f"Config not found: {config_path}")
     return yaml.load(config_path)
 
-def eval_and_record(agent, env_id, step, video_dir, device, max_steps=500, action_repeat=2):
-    # Create step-specific subdirectory to avoid overwriting videos
+def get_state_dims(agent):
+    """Helper to get state dimensions from agent (works for V1, V2, V3)"""
+    if hasattr(agent, 'rssm') and hasattr(agent.rssm, 'stoch_dim'):
+        stoch_dim = agent.rssm.stoch_dim
+        if hasattr(agent.rssm, 'stoch_classes'):
+            stoch_classes = agent.rssm.stoch_classes
+            stoch_flat_dim = stoch_dim * stoch_classes
+        else:
+            stoch_flat_dim = stoch_dim
+        deter_dim = agent.rssm.deter_dim
+    else:
+        stoch_dim = agent.cfg['model']['rssm'].get('stoch_dim', 32)
+        stoch_classes = agent.cfg['model']['rssm'].get('stoch_classes', 1)
+        stoch_flat_dim = stoch_dim * stoch_classes
+        deter_dim = agent.cfg['model']['rssm']['deter_dim']
+    
+    return stoch_flat_dim, deter_dim
+
+def eval_policy(agent, env_id, device, num_episodes=100, max_steps=1000, action_repeat=2, seed=None):
+    """
+    Evaluate policy on multiple episodes and return statistics.
+    
+    Args:
+        agent: DreamerAgent
+        env_id: Environment ID
+        device: Device to use
+        num_episodes: Number of evaluation episodes (default 100)
+        max_steps: Max steps per episode
+        action_repeat: Action repeat factor
+        seed: Random seed for reproducibility
+    
+    Returns:
+        dict: {
+            'mean_reward': float,
+            'std_reward': float,
+            'min_reward': float,
+            'max_reward': float,
+            'mean_length': float,
+            'episode_rewards': list
+        }
+    """
+    stoch_flat_dim, deter_dim = get_state_dims(agent)
+    action_dim = agent.action_dim
+    
+    episode_rewards = []
+    episode_lengths = []
+    
+    for ep_idx in range(num_episodes):
+        env = make_env(env_id, action_repeat=action_repeat, seed=seed)
+        obs, _ = env.reset()
+        
+        state = (torch.zeros(1, stoch_flat_dim).to(device), torch.zeros(1, deter_dim).to(device))
+        last_action = torch.zeros(1, action_dim).to(device)
+        
+        ep_reward = 0.0
+        ep_length = 0
+        done = False
+        
+        while not done and ep_length < max_steps:
+            act_data, next_state, env_action = agent.policy(obs, state, last_action, mode='eval')
+            state = next_state
+            last_action = torch.tensor(act_data, dtype=torch.float32).to(device)
+            if last_action.ndim == 1:
+                last_action = last_action.unsqueeze(0)
+            
+            obs, reward, terminated, truncated, _ = env.step(env_action)
+            ep_reward += reward
+            ep_length += 1
+            done = terminated or truncated
+        
+        env.close()
+        episode_rewards.append(ep_reward)
+        episode_lengths.append(ep_length)
+        
+        if (ep_idx + 1) % max(1, num_episodes // 10) == 0:
+            print(f"  Eval progress: {ep_idx + 1}/{num_episodes} episodes")
+    
+    mean_reward = np.mean(episode_rewards)
+    std_reward = np.std(episode_rewards)
+    
+    return {
+        'mean_reward': mean_reward,
+        'std_reward': std_reward,
+        'min_reward': np.min(episode_rewards),
+        'max_reward': np.max(episode_rewards),
+        'mean_length': np.mean(episode_lengths),
+        'episode_rewards': episode_rewards
+    }
+
+def eval_and_record(agent, env_id, step, video_dir, device, num_episodes=100, max_steps=1000, action_repeat=2):
+    """
+    Evaluate policy (100 episodes) and record one video.
+    
+    Returns:
+        dict with eval stats and video path
+    """
+    print(f"\n{'='*60}")
+    print(f"Evaluation at step {step} ({num_episodes} episodes)")
+    print(f"{'='*60}")
+    
+    # Run evaluation
+    eval_stats = eval_policy(agent, env_id, device, num_episodes=num_episodes, 
+                            max_steps=max_steps, action_repeat=action_repeat)
+    
+    print(f"Mean reward: {eval_stats['mean_reward']:.1f} ± {eval_stats['std_reward']:.1f}")
+    print(f"Min/Max: {eval_stats['min_reward']:.1f} / {eval_stats['max_reward']:.1f}")
+    print(f"Mean episode length: {eval_stats['mean_length']:.0f} steps")
+    
+    # Record one video episode
+    stoch_flat_dim, deter_dim = get_state_dims(agent)
     step_video_dir = pathlib.Path(video_dir) / f"step_{step}"
     step_video_dir.mkdir(parents=True, exist_ok=True)
     
-    # Validation step with internal recording
-    print(f"Recording evaluation video at step {step}...")
-    env = make_env(env_id, action_repeat=action_repeat, record=True, record_path=str(step_video_dir), record_freq=1)
+    print(f"\nRecording video to {step_video_dir}...")
+    env = make_env(env_id, action_repeat=action_repeat, record=True, 
+                  record_path=str(step_video_dir), record_freq=1)
     
     obs, _ = env.reset()
-    
-    stoch_dim = agent.cfg['model']['rssm']['stoch_dim']
-    deter_dim = agent.cfg['model']['rssm']['deter_dim']
-    
-    # For V2: stoch_flat is stoch_dim * stoch_classes
-    if hasattr(agent, 'rssm') and hasattr(agent.rssm, 'stoch_classes'):
-        stoch_flat_dim = stoch_dim * agent.rssm.stoch_classes
-    else:
-        stoch_flat_dim = stoch_dim
-    
     state = (torch.zeros(1, stoch_flat_dim).to(device), torch.zeros(1, deter_dim).to(device))
-    
-    action_dim = env.action_space.shape[0] if hasattr(env.action_space, 'shape') else env.action_space.n
-    last_action = torch.zeros(1, action_dim).to(device)
+    last_action = torch.zeros(1, agent.action_dim).to(device)
     
     done = False
     curr_step = 0
-    total_reward = 0
+    video_reward = 0
     
     while not done and curr_step < max_steps:
-        # Pass 'eval' mode
         act_data, next_state, env_action = agent.policy(obs, state, last_action, mode='eval')
         state = next_state
-        last_action = torch.tensor(act_data).float().unsqueeze(0).to(device)
+        last_action = torch.tensor(act_data, dtype=torch.float32).to(device)
+        if last_action.ndim == 1:
+            last_action = last_action.unsqueeze(0)
         
         obs, reward, terminated, truncated, _ = env.step(env_action)
-        total_reward += reward
+        video_reward += reward
         curr_step += 1
         done = terminated or truncated
-        
+    
     env.close()
-    return total_reward
+    eval_stats['video_reward'] = video_reward
+    eval_stats['video_path'] = str(step_video_dir)
+    
+    return eval_stats
 
 def main():
-    # Args already parsed at module level
-    # CUDA_VISIBLE_DEVICES already set before imports
-    
-    # 1. Setup Environment and Paths
     config = load_config(args.version, args.exp)
     
-    # Override env if provided
     if args.env:
         config['env'] = args.env
 
     action_repeat = config.get('action_repeat', 2)
-    device = torch.device("cuda" if torch.cuda.is_available() and config['device'] == "cuda" else "cpu")
+    
+    # Force CPU if --gpu -1, otherwise check CUDA availability
+    if args.gpu == "-1":
+        device = torch.device("cpu")
+        print("✓ Using CPU (forced by --gpu -1)")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() and config['device'] == "cuda" else "cpu")
+        if device.type == 'cuda':
+            print(f"✓ Using GPU {args.gpu}")
+            
+            # GPU optimizations
+            if config.get('tf32', True):
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+                print("✓ TF32 enabled")
+            
+            if config.get('cudnn_benchmark', True):
+                torch.backends.cudnn.benchmark = True
+                print("✓ CuDNN benchmark enabled")
     
     num_envs = config.get('num_envs', 1)
     is_vectorized = num_envs > 1
-    use_async = config.get('use_async', True)  # Enable async by default for better performance
+    use_async = config.get('use_async', True)
     
     if is_vectorized:
         print(f"Vectorized Training: {num_envs} parallel environments")
-        # Create vectorized environment
         def make_env_fn(rank):
             def _thunk():
                 return make_env(config['env'], action_repeat=action_repeat)
             return _thunk
         
         if use_async:
-            # Custom AsyncVectorEnv for better control and paper-like async behavior
             print(f"Using AsyncVectorEnv (parallel rendering with multiprocessing)")
             env = AsyncVectorEnv([make_env_fn(i) for i in range(num_envs)])
             obs_shape = env.observation_space.shape
@@ -167,9 +273,10 @@ def main():
     elif args.version == "v2":
         agent = DreamerV2Agent(config, obs_shape, action_dim, is_discrete, device)
     elif args.version == "v3":
-        agent = DreamerV3Agent(config, obs_shape, action_dim, is_discrete, device)
+        raise NotImplementedError("V3 agent imports need fixing. Use --version v1 or v2")
+        # agent = DreamerV3Agent(config, obs_shape, action_dim, is_discrete, device)
     else:
-        raise ValueError(f"Unknown version: {args.version}")
+        raise ValueError(f"Unknown version: {args.version}. Use 'v1' or 'v2'")
     
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     run_id = f"{args.version}_{args.exp}_{timestamp}"
@@ -286,14 +393,16 @@ def main():
     # 3. Main Training Loop
     print(f"--- Training Dreamer {args.version} on {config['env']} (GPU: {args.gpu}) ---")
     obs, _ = env.reset()
-    stoch_dim = config['model']['rssm']['stoch_dim']
     deter_dim = config['model']['rssm']['deter_dim']
     
-    # For V2/V3: stoch_flat is stoch_dim * stoch_classes, for V1: stoch_dim
+    # For V2/V3: stoch_dim and stoch_classes are FIXED at 32x32
     if args.version in ["v2", "v3"]:
-        stoch_classes = config['model']['rssm'].get('stoch_classes', 32)
-        stoch_flat_dim = stoch_dim * stoch_classes
+        stoch_dim = 32
+        stoch_classes = 32
+        stoch_flat_dim = stoch_dim * stoch_classes  # 1024
     else:
+        # V1 uses configurable stoch_dim
+        stoch_dim = config['model']['rssm']['stoch_dim']
         stoch_flat_dim = stoch_dim
     
     batch_size_state = num_envs if is_vectorized else 1
@@ -319,9 +428,9 @@ def main():
             batch_size=config['training']['batch_size'],
             seq_length=config['training']['seq_length'],
             device=device,
-            buffer_size=20  # Aumentado de 10 a 20 para evitar queue empty
+            buffer_size=3  # Reduced from 20 to 3 to save GPU memory
         )
-        print("Using PrefetchBuffer for async data loading (buffer_size=20)")
+        print("Using PrefetchBuffer for async data loading (buffer_size=3)")
     
     # Timing variables
     timer = {'interaction': 0.0, 'train': 0.0, 'eval': 0.0, 'total': 0.0}
@@ -331,8 +440,15 @@ def main():
     total_env_steps = start_step * num_envs  # Total env steps collected so far
     last_train_env_steps = 0  # Last env step count when we trained
 
-    pbar = tqdm(total=config['training']['total_steps'])
-    for step in range(start_step, config['training']['total_steps']):
+    # Progress bar should count env steps, not iterations
+    # With num_envs parallel: total_steps is in env steps, not iterations
+    total_env_steps_target = config['training']['total_steps']
+    pbar = tqdm(total=total_env_steps_target, desc="Env Steps", unit="envsteps")
+    pbar.update(total_env_steps)  # Start from current position
+    
+    # Loop in iterations, but stop when we reach total_env_steps target
+    max_iterations = (config['training']['total_steps'] + num_envs - 1) // num_envs  # Ceiling division
+    for step in range(start_step, max_iterations):
         step_start_time = time.time()
         
         # --- Interaction ---
@@ -461,17 +577,17 @@ def main():
                     agent.save(ckpt_dir / "best.pt", logs)
                 
                 obs, _ = env.reset()
-                state = (torch.zeros(1, stoch_dim).to(device), torch.zeros(1, deter_dim).to(device))
+                state = (torch.zeros(1, stoch_flat_dim).to(device), torch.zeros(1, deter_dim).to(device))
                 last_action = torch.zeros(1, action_dim).to(device)
                 episode_reward, episode_step, num_episodes = 0, 0, num_episodes + 1
         
         obs = next_obs
         timer['interaction'] += time.time() - t_interact_start
         
-        # Update TOTAL env steps counter (corregido: multiplicar por action_repeat)
-        # El paper reporta environment steps (física), no agent steps
-        current_steps = num_envs * action_repeat
-        total_env_steps += current_steps
+        # Update TOTAL env steps counter: number of agent steps (NOT physics steps)
+        # With vectorized envs, each iteration = num_envs steps
+        # action_repeat is internal to the environment, we count agent decisions
+        total_env_steps += num_envs
 
         # --- Training ---
         # Paper: train every N env steps. 
@@ -522,8 +638,8 @@ def main():
                     )
                     losses = agent.train_step(batch.obs, batch.actions, batch.rewards, batch.dones)
                 
-                # Only log every 500 updates to reduce I/O overhead and GPU sync
-                if train_step_idx % 500 == 0:
+                # Only log every 50 updates to reduce I/O overhead and GPU sync
+                if train_step_idx % 50 == 0:
                     # Convert GPU tensors to scalars for logging
                     losses_scalar = {k: v.item() if isinstance(v, torch.Tensor) else v for k, v in losses.items()}
                     for name, loss in losses_scalar.items():
@@ -539,28 +655,51 @@ def main():
                     pbar_dict['avg_100ep'] = f"{np.mean(recent_rewards):.1f}"
                 if avg_reward is not None:
                     pbar_dict['ema'] = f"{avg_reward:.1f}"
-                pbar_dict['env_steps'] = f"{total_env_steps}"
                 pbar.set_postfix(pbar_dict)
+                # Update progress bar with env steps, not iterations
+                pbar.n = total_env_steps
+                pbar.refresh()
             timer['train'] += time.time() - t0
             
             # Update last train counter
             last_train_env_steps = total_env_steps
 
-        # Periodic checkpoint and video
+        # Periodic checkpoint and video (use config intervals in env_steps)
         t0 = time.time()
-        # Save checkpoint every 10k
-        if step % 10000 == 0:
-             logs = {'step': step, 'episode_reward': episode_reward, 'num_episodes': num_episodes, 'losses': losses_scalar}
-             agent.save(ckpt_dir / f"step_{step}.pt", logs)
+        save_interval = config.get('logging', {}).get('save_interval', 10000)
+        eval_interval = config.get('logging', {}).get('eval_interval', 20000)
+        
+        # Save checkpoint at intervals (in env_steps)
+        if total_env_steps % save_interval < num_envs and total_env_steps >= save_interval:
+             logs = {'step': step, 'total_env_steps': total_env_steps, 'episode_reward': episode_reward, 'num_episodes': num_episodes, 'losses': losses_scalar}
+             agent.save(ckpt_dir / f"step_{total_env_steps}.pt", logs)
+             print(f"\n>>> Checkpoint saved at {total_env_steps} env steps <<<\n")
 
-        # Record video every 20k steps
-        if step % 20000 == 0 and step > 0:
+        # Record video at intervals (in env_steps)
+        if total_env_steps % eval_interval < num_envs and total_env_steps >= eval_interval:
             pbar.set_description("Phase: Evaluation & Video")
             
-            # Record video
-            eval_rew = eval_and_record(agent, config['env'], step, video_dir, device, action_repeat=action_repeat)
-            writer.add_scalar("eval/reward", eval_rew, step)
-            log_metrics(step, {'eval_reward': eval_rew})
+            # Evaluate policy over 100 episodes with statistics
+            eval_stats = eval_and_record(agent, config['env'], total_env_steps, video_dir, device, 
+                                        num_episodes=100, action_repeat=action_repeat)
+            
+            # Log evaluation statistics
+            writer.add_scalar("eval/mean_reward", eval_stats['mean_reward'], total_env_steps)
+            writer.add_scalar("eval/std_reward", eval_stats['std_reward'], total_env_steps)
+            writer.add_scalar("eval/min_reward", eval_stats['min_reward'], total_env_steps)
+            writer.add_scalar("eval/max_reward", eval_stats['max_reward'], total_env_steps)
+            writer.add_scalar("eval/mean_length", eval_stats['mean_length'], total_env_steps)
+            writer.add_scalar("eval/video_reward", eval_stats['video_reward'], total_env_steps)
+            
+            log_metrics(total_env_steps, {
+                'eval_mean_reward': eval_stats['mean_reward'],
+                'eval_std_reward': eval_stats['std_reward'],
+                'eval_video_reward': eval_stats['video_reward']
+            })
+            print(f">>> Evaluation completed at {total_env_steps} env steps <<<")
+            print(f"    Mean±Std: {eval_stats['mean_reward']:.1f}±{eval_stats['std_reward']:.1f}")
+            print(f"    Video reward: {eval_stats['video_reward']:.1f}")
+            print(f"    Video saved to: {eval_stats['video_path']}\n")
         timer['eval'] += time.time() - t0
 
         timer['total'] += time.time() - step_start_time

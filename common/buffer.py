@@ -64,7 +64,7 @@ dones_buffer_shape: {self.dones.shape}
         if self.pointer == 0:
             self.full = True
 
-    def sample(self, batch_size, seq_len, device):
+    def sample(self, batch_size, seq_len, device, pin_memory=False):
         """
         Samples batches of experiences of fixed sequence length from the replay buffer, 
         taking into account the circular nature of the buffer to avoid crossing the 
@@ -79,6 +79,7 @@ dones_buffer_shape: {self.dones.shape}
             batch_size (int): The number of sequences to sample.
             seq_len (int): The length of each sequence to sample.
             device (torch.device): The device on which the sampled data will be loaded.
+            pin_memory (bool): If True, use pinned memory for faster GPU transfers.
 
         Raises:
             Exception: If there is not enough data in the buffer to sample a full sequence.
@@ -123,10 +124,13 @@ dones_buffer_shape: {self.dones.shape}
         
         batch = Dict()
         
-        batch.obs = torch.from_numpy(self.observation[sample_idcs]).to(device)
-        batch.actions = torch.from_numpy(self.actions[sample_idcs]).to(device)
-        batch.rewards = torch.from_numpy(self.rewards[sample_idcs]).to(device)
-        batch.dones = torch.from_numpy(self.dones[sample_idcs]).to(device)
+        # Use non_blocking transfers when pin_memory is enabled for faster GPU transfers
+        non_blocking = pin_memory and device.type == 'cuda'
+        
+        batch.obs = torch.from_numpy(self.observation[sample_idcs]).to(device, non_blocking=non_blocking)
+        batch.actions = torch.from_numpy(self.actions[sample_idcs]).to(device, non_blocking=non_blocking)
+        batch.rewards = torch.from_numpy(self.rewards[sample_idcs]).to(device, non_blocking=non_blocking)
+        batch.dones = torch.from_numpy(self.dones[sample_idcs]).to(device, non_blocking=non_blocking)
         
         return batch
     

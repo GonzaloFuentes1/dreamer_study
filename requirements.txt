@@ -1,8 +1,11 @@
 torch
+torchvision
 gymnasium[classic_control,atari,accept-rom-license,box2d,mujoco]
 numpy
 tensorboard
 ruamel.yaml
+addict
+pytorch_optimizer
 tqdm
 swig
 dm_control
@@ -10,3 +13,5 @@ mujoco
 shimmy
 opencv-python
 moviepy
+matplotlib
+pandas

@@ -1,51 +1,73 @@
-# DreamerV1: DMC Cheetah Run (Continuous Control)
+# Dreamer V1 Cheetah Run Configuration
 # Paper: Dream to Control (Hafner et al., 2020)
+# Merged from: common.yaml + dreamer_v1.yaml
+# Key: Continuous Gaussian latent distributions
+
 env: "dm_control/cheetah-run-v0"
 device: "cuda"
-action_repeat: 2
-num_envs: 10
+action_repeat: 4  # Higher frame skip for faster locomotion
+num_envs: 16
 
-# Async Processing
+# Async & GPU Optimization
 use_async: true
 use_prefetch: true
+pin_memory: true
+mixed_precision: true
+cudnn_benchmark: true
+tf32: true
+compile_model: false
 
 # Training Schedule
 training:
-  total_steps: 200000
+  total_steps: 500000  # Shorter horizon for cheetah
   initial_episodes: 5
   train_every: 1000
   train_steps: 100
   batch_size: 50
   seq_length: 50
 
-# World Model
+# World Model (13.8M params - scaled version)
 model:
-  embed_dim: 1024
-  num_units: 400
+  embed_dim: 2048  # For encoder/decoder balance
+  num_units: 800   # MLP hidden units (scaled from 300)
   lr: 0.0006
   kl_free_nats: 3.0
+  kl_scale: 1.0
   rssm:
-    stoch_dim: 30
-    deter_dim: 200
-    hidden_dim: 200
+    stoch_dim: 30      # FIXED from paper (non-negotiable)
+    deter_dim: 600     # Scaled from 200
+    hidden_dim: 600    # RSSM internal
+    prior_min_std: 0.1
+    posterior_min_std: 0.1
 
-# Actor
+# Actor (Policy)
 actor:
   lr: 0.00008
   horizon: 15
+  action_min_std: 0.1
+  action_max_std: 1.0
+  entropy_coef: 0.0
 
-# Critic
+# Critic (Value Function)
 critic:
   lr: 0.00008
   gamma: 0.99
-  lambda: 0.95
+  lambda_: 0.95
 
 # Replay Buffer
 buffer:
-  capacity: 1000000
+  capacity: 5000000
 
 # Logging
 logging:
-  eval_interval: 10000
-  save_interval: 50000
+  eval_interval: 1000
+  save_interval: 5000
+  video_interval: 5000
+
+# Algorithm Settings
+algorithm:
+  imagination_horizon: 15
+  use_value_bootstrap: true
+  gradient_clip_norm: 100.0
+
   video_interval: 50000

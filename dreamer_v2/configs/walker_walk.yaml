@@ -1,56 +1,84 @@
-# DreamerV2: DMC Walker Walk (Continuous Control)
+# Dreamer V2 Walker Walk Configuration
 # Paper: Mastering Atari with Discrete World Models (Hafner et al., 2021)
+# Merged from: common.yaml + dreamer_v2.yaml
+# Key: Discrete categorical latent distributions (32×32)
+
 env: "dm_control/walker-walk-v0"
 device: "cuda"
 action_repeat: 2
-num_envs: 16
+num_envs: 32  # Higher parallelism for V2
 
-# Async Processing
+# Async & GPU Optimization
 use_async: true
-use_prefetch: false
+use_prefetch: true
+pin_memory: true
+mixed_precision: true
+cudnn_benchmark: true
+tf32: true
+compile_model: false
 
-
-# Training Schedule
+# Training Schedule (DMC Continuous)
 training:
   total_steps: 1000000
   initial_episodes: 5
-  train_every: 4
-  train_steps: 1
+  train_every: 1000
+  train_steps: 100
   batch_size: 50
   seq_length: 50
 
 # World Model
 model:
   embed_dim: 1024
-  lr: 2e-4
+  grayscale: false
+  lr: 0.0002
   kl_alpha: 0.8
   kl_scale: 1.0
-  kl_free_nats: 1.0
+  kl_free_nats: 3.0
+  reward_transformation: "tanh"
   rssm:
-    stoch_dim: 32
-    stoch_classes: 32
-    deter_dim: 200
-    hidden_dim: 200
+    num_classes: 32
+    class_dim: 32
+    deter_dim: 1024
+    hidden_dim: 1100
 
-# Actor
+# Actor (Policy)
 actor:
-  lr: 4e-5
+  lr: 0.00004
   horizon: 15
-  rho: 0.0  # Paper V2: 0=dynamics only, 1=REINFORCE only (0.0-1.0 mix)
-  entropy_coef: 1e-4
+  rho: 0.0  # Paper: 0.0 for continuous (dynamics backprop), 1.0 for Atari (Reinforce)
+  entropy_scale: 0.0001  # Paper: 1e-4 for continuous control
 
-# Critic
+# Critic (Value Function)
 critic:
-  lr: 1e-4
+  lr: 0.0001
   gamma: 0.995
-  lambda: 0.95
+  lambda_: 0.95
+  slow_target_update: 100
+  slow_target_fraction: 1.0
 
 # Replay Buffer
 buffer:
-  capacity: 1000000
+  capacity: 2000000
+
+
+# Algorithm Settings
+algorithm:
+  imagination_horizon: 15
+  use_straight_through: true
+  gradient_clip_norm: 100.0
+
+network:
+  mlp_layers: 4  # Paper V2 Table: MPL number of layers
+  mlp_units: 400  # Paper V2 Table: MPL number of units
+  
+# Optimizer (Common - Paper V2 Table)
+optimizer:
+  grad_clip: 100  # Paper V2 Table: Gradient clipping
+  adam_eps: 1e-5  # Paper V2 Table: Adam epsilon ε = 10⁻⁵
+  weight_decay: 1e-6  # Paper V2 Table: Weight decay (decoupled) = 10⁻⁶
 
 # Logging
 logging:
-  eval_interval: 2000
-  save_interval: 10000
-  video_interval: 10000
+  eval_interval: 25000  # Evaluate every 25k env steps (~1562 iters with 16 envs)
+  save_interval: 25000  # Save checkpoint every 10k env steps (~625 iters)
+  video_interval: 25000  # Record video every 50k env steps (less frequent)

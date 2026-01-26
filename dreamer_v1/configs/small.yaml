@@ -1,12 +1,11 @@
-# Dreamer V1 Walker Walk Configuration
+# Dreamer V1 Small Configuration (3M params - original paper)
 # Paper: Dream to Control (Hafner et al., 2020)
-# Merged from: common.yaml + dreamer_v1.yaml
-# Key: Continuous Gaussian latent distributions
+# Appendix A: Architecture Details
 
-env: "dm_control/walker-walk-v0"
+env: "dm_control/cheetah-run-v0"
 device: "cuda"
-action_repeat: 2
-num_envs: 4
+action_repeat: 4
+num_envs: 16
 
 # Async & GPU Optimization
 use_async: true
@@ -19,24 +18,24 @@ compile_model: false
 
 # Training Schedule
 training:
-  total_steps: 1000000
+  total_steps: 500000
   initial_episodes: 5
   train_every: 1000
   train_steps: 100
   batch_size: 50
   seq_length: 50
 
-# World Model (13.8M params - scaled version)
+# World Model (3M params - original paper)
 model:
-  embed_dim: 2048  # For encoder/decoder balance
-  num_units: 800   # MLP hidden units (scaled from 300)
+  embed_dim: 1024  # Original paper value
+  num_units: 300   # "three dense layers of size 300 with ELU activations"
   lr: 0.0006
   kl_free_nats: 3.0
   kl_scale: 1.0
   rssm:
-    stoch_dim: 30      # FIXED from paper (non-negotiable)
-    deter_dim: 600     # Scaled from 200
-    hidden_dim: 600    # RSSM internal
+    stoch_dim: 30      # FIXED from paper (diagonal Gaussian)
+    deter_dim: 200     # Original GRU hidden size
+    hidden_dim: 300    # RSSM internal
     prior_min_std: 0.1
     posterior_min_std: 0.1
 
@@ -56,16 +55,17 @@ critic:
 
 # Replay Buffer
 buffer:
-  capacity: 10000000
+  capacity: 5000000
 
 # Logging
 logging:
-  eval_interval: 25000
-  save_interval: 25000
-  video_interval: 25000
+  eval_interval: 1000
+  save_interval: 5000
+  video_interval: 5000
 
 # Algorithm Settings
 algorithm:
   imagination_horizon: 15
   use_value_bootstrap: true
   gradient_clip_norm: 100.0
+  video_interval: 50000

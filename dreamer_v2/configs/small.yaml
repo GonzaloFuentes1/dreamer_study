@@ -1,11 +1,11 @@
-# Dreamer V2 Cheetah Run Configuration
-# Paper: Mastering Atari with Discrete World Models (Hafner et al., 2021)
-# Key: Discrete categorical latent distributions (32×32)
+# Dreamer V2 Small Configuration (~13M parameters)
+# Scaled down version for faster training
+# Based on walker_walk.yaml with reduced dimensions
 
-env: "dm_control/cheetah-run-v0"
+env: "dm_control/walker-walk-v0"
 device: "cuda"
-action_repeat: 4
-num_envs: 32
+action_repeat: 2
+num_envs: 16  # Reduced for smaller model
 
 # Async & GPU Optimization
 use_async: true
@@ -25,11 +25,11 @@ training:
   batch_size: 50
   seq_length: 50
 
-# World Model
+# World Model - SCALED DOWN
 model:
   embed_dim: 1024
   grayscale: false
-  lr: 0.0002
+  lr: 0.0003
   kl_alpha: 0.8
   kl_scale: 1.0
   kl_free_nats: 3.0
@@ -37,19 +37,19 @@ model:
   rssm:
     num_classes: 32
     class_dim: 32
-    deter_dim: 1024
-    hidden_dim: 1100
+    deter_dim: 600  # Reduced from 1024
+    hidden_dim: 600  # Reduced from 1100
 
 # Actor (Policy)
 actor:
-  lr: 0.00004
+  lr: 0.00008
   horizon: 15
   rho: 0.0  # Paper: 0.0 for continuous (dynamics backprop), 1.0 for Atari (Reinforce)
   entropy_scale: 0.0001  # Paper: 1e-4 for continuous control
 
 # Critic (Value Function)
 critic:
-  lr: 1e-4
+  lr: 0.00008
   gamma: 0.995
   lambda_: 0.95
   slow_target_update: 100
@@ -57,16 +57,26 @@ critic:
 
 # Replay Buffer
 buffer:
-  capacity: 2000000
-
-# Logging
-logging:
-  eval_interval: 1000
-  save_interval: 5000
-  video_interval: 5000
+  capacity: 1000000
 
 # Algorithm Settings
 algorithm:
   imagination_horizon: 15
   use_straight_through: true
   gradient_clip_norm: 100.0
+
+network:
+  mlp_layers: 4
+  mlp_units: 400
+  
+# Optimizer
+optimizer:
+  grad_clip: 100
+  adam_eps: 0.00001
+  weight_decay: 0.000001
+
+# Logging
+logging:
+  eval_interval: 10000
+  save_interval: 10000
+  video_interval: 25000

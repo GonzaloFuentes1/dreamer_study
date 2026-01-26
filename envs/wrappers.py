@@ -94,6 +94,7 @@ class DMCtoGymWrapper(gym.Env):
         )
         
         self.resize = resize
+        # DreamerV1 and V2 use uint8 [0, 255] in buffer, normalize during training (paper-faithful)
         self.observation_space = gym.spaces.Box(low=0, high=255, shape=(3, *resize), dtype=np.uint8)
 
         if camera is None:
@@ -170,6 +171,7 @@ class DMCtoGymWrapper(gym.Env):
         time_step = self.env.reset()
         obs = self.env.physics.render(height=self.resize[0], width=self.resize[1], camera_id=self._camera)
         obs = obs.transpose([2, 0, 1])  # HWC -> CHW
+        # Keep as uint8 [0, 255] for DreamerV1
         
         return obs, {}
 

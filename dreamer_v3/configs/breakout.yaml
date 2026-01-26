@@ -1,45 +1,59 @@
-# DreamerV3: Atari Breakout (Discrete Actions)
+# Dreamer V3 Breakout Configuration
 # Paper: Mastering Diverse Domains through World Models (Hafner et al., 2023)
+# Key: Atari discrete actions, larger RSSM for complex observations
+
 env: "BreakoutNoFrameskip-v4"
 device: "cuda"
 action_repeat: 4
-num_envs: 10
+num_envs: 32
 
-# Training Schedule (Table 4)
+# Async & GPU Optimization
+use_async: true
+use_prefetch: false
+pin_memory: true
+mixed_precision: true
+cudnn_benchmark: true
+tf32: true
+compile_model: false
+
+# Training Schedule (Atari)
 training:
-  total_steps: 1000000
-  initial_episodes: 5
-  train_every: 4
+  total_steps: 2000000
+  initial_episodes: 10
+  train_every: 5
   train_steps: 1
-  batch_size: 16
+  batch_size: 32
   seq_length: 64
 
-# World Model (Table 4)
+# World Model (Atari: larger than DMC)
 model:
   embed_dim: 1024
-  lr: 0.00004  # 4e-5
+  grayscale: true
+  lr: 1e-4
   kl_free_nats: 1.0
   beta_pred: 1.0
-  beta_dyn: 1.0
+  beta_dyn: 0.5
   beta_rep: 0.1
   rssm:
-    stoch_dim: 32
-    stoch_classes: 32
-    deter_dim: 512
-    hidden_dim: 512
+    deter_dim: 4096  # Larger for Atari
+    hidden_dim: 4096
+    use_rms_norm: true
+    use_block_linear: true
+    min_std: 0.1
 
-# Actor (Table 4)
+# Actor (Policy)
 actor:
+  lr: 3e-5
   horizon: 15
-  entropy_coef: 0.0003
+  entropy_coef: 3e-3  # Higher for discrete actions
+  use_stop_gradient: true
 
-# Critic (Table 4)
+# Critic (Value Function)
 critic:
+  lr: 3e-5
   gamma: 0.997
-  lambda: 0.95
-  beta_val: 1.0
-  beta_repval: 0.3
-  ema_decay: 0.98
+  lambda_: 0.95
+  slow_target_fraction: 0.02
 
 # Replay Buffer
 buffer:
@@ -47,6 +61,15 @@ buffer:
 
 # Logging
 logging:
-  eval_interval: 100000
-  save_interval: 500000
-  video_interval: 500000
+  eval_interval: 10000
+  save_interval: 50000
+  video_interval: 50000
+
+# Algorithm Settings
+algorithm:
+  imagination_horizon: 15
+  optimizer: "laprop"
+  gradient_clip_norm: 100.0
+  laprop_beta1: 0.9
+  laprop_beta2: 0.999
+  laprop_epsilon: 1e-8
