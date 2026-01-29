@@ -155,6 +155,9 @@ cython_debug/
 # IDE specific
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
 
 # --- Custom Project Ignores ---
 # Large generated files
@@ -162,3 +165,17 @@ checkpoints/
 runs/
 logs_vec/
 videos/
+
+# Model checkpoints
+*.pt
+*.pth
+*.ckpt
+
+# Data and experiments
+data/
+experiments/
+output/
+
+# Environment-specific
+.DS_Store
+Thumbs.db
