@@ -259,12 +259,7 @@ cartpole-balance, cartpole-swingup
 ```
 Classic Control: CartPole-v1, MountainCar-v0, Pendulum-v1
 Box2D: LunarLander-v2, BipedalWalker-v3
-Atari: (requiere configuración adicional)
-```
-
-### Mejores Prácticas
-
-1. **Empezar res additional configuration)
+Atari: (requires additional configuration)
 ```
 
 ### Best Practices
@@ -278,53 +273,44 @@ Atari: (requiere configuración adicional)
 
 ## Version Comparison
 
-| Feature | V1 (2020) ✅ | V2 (2021) ✅ | V3 (2024) 🚧 | V4 ❌t | TBD |
-| **Decoder** | Gaussian | Gaussian | Sigmoid [0,1] | TBD |
-| **Capas MLP** | 2-3 capas | 4 capas | 5 capas | TBD |
-| **Unidades por Capa** | 200-400 | 400 | 640 | TBD |
-| **Normalización** | None | LayerNorm | RMSNorm | TBD |
-| **Optimizador** | Adam | Adam | LaProp + AGC | TBD |
-| **Return Normalization** | ❌ | ❌ | ✅ EMA percentiles | TBD |
-| **Loss Magnitude** | ~11,800 | ~11,800 | ~7 | TBD |
-| **Estabilidad** | Buena | Muy buena | Excelente | TBD |
-| **Performance** | Baseline | +20% vs V1 | +40% vs V2 | TBD |
+| Feature | V1 (2020) ✅ | V2 (2021) ✅ | V3 (2024) 🚧 | V4 ❌ |
+|----------------|-----------|-----------|--------------|-------------------|
+| **Status** | Complete | Complete | Needs fixes | Not implemented |
+| **Latent States** | Gaussian | 32×32 Categorical | 32×32 Categorical | - |
+| **Reward Pred** | MSE | MSE | Symexp twohot (255 bins) | - |
+| **Value Pred** | Scalar MSE | Scalar MSE | Symexp twohot (255 bins) | - |
+| **Continue/Discount** | Fixed γ | Discount predictor | Binary continue c_t | - |
+| **Decoder** | Gaussian | Gaussian | Sigmoid [0,1] | - |
+| **MLP Layers** | 2-3 layers | 4 layers | 5 layers | - |
+| **Units per Layer** | 200-400 | 400 | 640 | - |
+| **Normalization** | None | LayerNorm | RMSNorm | - |
+| **Optimizer** | Adam | Adam | LaProp + AGC | - |
+| **Return Norm** | No | No | EMA percentiles | - |
+| **Loss Magnitude** | ~11,800 | ~11,800 | ~7 | - |
 
-### ⭐ Dreamer V3 - Características Destacadas
+### Version Recommendations
 
-**Mejoras Principales:**
-- ✅ **Symexp twohot**: 255 bins espaciados exponencialmente para reward/value
-- ✅ **Normalización de retornos**: Escalado adaptativo EMA entre dominios
-- ✅ **Predictor continue**: c_t binario ∈ {0,1} en lugar de discount
-- ✅ **Arquitectura mejorada**: RMSNorm, BlockLinear, redes más profundas
-- ✅ **Robustez**: Hiperparámetros fijos funcionan en dominios diversos
-- ✅ **Eficiencia**: ~30% más rápido que V2 con mixed precision
+**When to use each version:**
+- **V1 or V2**: For production use and new projects (both complete and working)
+- **V3**: For experimental work (needs fixes before production use)
+- **V4**: Not available yet
 
-**Cuando usar cada versión:**
-- **V3**: Para nuevos proyectos y mejor rendimiento (recomendado)
-- **V2**: Para comparaciones con literatura reciente
-- **V1**: Para entender fundamentos y experimentos educativos
-
-## 🏗️ Arquitecturas
+## Architectures
 
 ### RSSM (Recurrent State Space Model)
 
-Todas las versiones usan variantes del RSSM:
+All versions use variants of the RSSM:
 
 ```
 Observation → Encoder → Representation
                             ↓
-All versions use variants of theochastic
+         Deterministic ← Dynamics → Stochastic
               h_t               z_t
                 ↓                 ↓
             Decoder         Reward/Value
 ```
 
-**V1 RSSM**: Estados estocásticos Gaussianos
-```python
-h_t = f(h_{t-1}, z_{t-1}, a_{t-1})  # GRU
-z_t ~ N(μ(h_t, o_t), σ(h_t, o_t))   # Gaussian
-```
-Gaussian stochastic states
+**V1 RSSM**: Gaussian stochastic states
 ```python
 h_t = f(h_{t-1}, z_{t-1}, a_{t-1})  # GRU
 z_t ~ N(μ(h_t, o_t), σ(h_t, o_t))   # Gaussian
@@ -354,36 +340,10 @@ TransConv 6×6, 3 filters, stride 2 → Sigmoid (V3) / Gaussian (V1/V2)
 
 **MLP (V3)**
 ```
-5 capas × 640 unidades
-RMSNorm + SiLU activación
-Block-diagonal linear para eficiencia
-```
-
-##layers × 640 units
+5 layers × 640 units
 RMSNorm + SiLU activation
 Block-diagonal linear for efficiency
 ```
-
-## Results and Benchmarks
-
-### Performance o50 | 680 | 820 | 1M |
-| hopper-hop | 150 | 200 | 280 | 1M |
-| Environment | V1 ✅ | V2 ✅ | V3 🚧 | Steps |
-|----------|----|----|-----|-------|
-| walker-walk | 750 | 850 | TBD | 1M |
-| cheetah-run | 550 | 680 | TBD | 1M |
-| hopper-hop | 150 | 200 | TBD | 1M |
-| humanoid-walk | 250 | 320 | TBD | 2M |
-
-*Average scores from 10 seeds. Values normalized to [0, 1000]. V3 results pending fixes.*
-on | Steps/sec | GPU Memory | Time 1M steps |
-|---------|-----------|-------------|-----------------|
-| V1 FP32 | 1200 | 6GB | 14 hours |
-| V2 FP32 | 1000 | 7GB | 17 hours |
-| V3 FP16 | TBD | 8GB | TBD |
-| V3 FP32 | TBD | 12GB | TBD |
-
-*V3 benchmarks pending fixes.*
 
 ## Documentation
 
@@ -408,7 +368,9 @@ Different loss formulations:
 **Both are correct!** Same gradients, different scales. Do not compare magnitudes directly between versions.
 
 ### Debugging
-Detailed outputs
+
+```bash
+# Detailed outputs
 python scripts/train.py --version v1 --exp walker_walk --debug
 
 # Quick component test
@@ -436,14 +398,11 @@ Contributions are welcome! Please:
 - [ ] More environments (Atari, MuJoCo, etc.)
 - [ ] Distributed training
 - [ ] World model visualization
-- [ ] Additional benchmarks
 - [ ] Documentation improvements
 
 ## References
 
-### Original Paper
-
-### Papers Originales
+### Original Papers
 
 **Dreamer V1** (2020)
 ```bibtex
