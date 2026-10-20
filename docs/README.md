@@ -1,39 +1,30 @@
 # Documentation
 
-This directory contains general documentation for the Dreamer Study repository.
+This directory holds the documentation index for the Dreamer Study repository. Each version keeps its own notes next to its code.
 
 ## Contents
 
-- [Getting Started](../README.md) - Main README with installation and quick start
-- [Version Comparison](version_comparison.md) - Detailed comparison between Dreamer versions
-- [Training Guide](training_guide.md) - Comprehensive training guide
-- [API Reference](api_reference.md) - API documentation
+- [Main README](../README.md): status, installation, usage and version comparison
+- [Contributing guide](../CONTRIBUTING.md)
 
-## Version-Specific Documentation
+## Per-version documentation
 
-- [Dreamer V1 Documentation](../dreamer_v1/docs/)
-- [Dreamer V2 Documentation](../dreamer_v2/docs/)
-- [Dreamer V3 Documentation](../dreamer_v3/docs/) (TODO)
+- [Dreamer V1 algorithm notes](../dreamer_v1/docs/ALGORITHM.md)
+- [Dreamer V2 algorithm notes](../dreamer_v2/docs/ALGORITHM.md)
+- [Dreamer V3 implementation notes](../dreamer_v3/README.md)
+- [Dreamer V3 status](../dreamer_v3/docs/README.md)
 
-## Additional Resources
+## Code entry points
 
-- [Common Utilities](../common/) - Shared utilities and buffers
-- [Environment Wrappers](../envs/) - Environment wrapper documentation
-- [Training Scripts](../scripts/) - Training and evaluation scripts
+- [Common modules](../common/): base agent, replay buffers, utilities
+- [Environment wrappers](../envs/): DMControl and Gymnasium wrappers
+- [Training scripts](../scripts/): `train.py` and analysis helpers
 
-## Contributing to Documentation
+## Papers
 
-If you'd like to contribute to the documentation:
+The original papers are not stored in this repository. They are available on arXiv:
 
-1. Follow the existing documentation structure
-2. Use clear and concise language
-3. Include code examples where appropriate
-4. Add references to papers and resources
-
-## TODO
-
-- [ ] Complete version comparison guide
-- [ ] Add training best practices
-- [ ] Document hyperparameter tuning
-- [ ] Add troubleshooting guide
-- [ ] Complete V3 documentation
+- Dreamer V1: https://arxiv.org/abs/1912.01603
+- Dreamer V2: https://arxiv.org/abs/2010.02193
+- Dreamer V3: https://arxiv.org/abs/2301.04104
+- Dreamer 4: https://arxiv.org/abs/2509.24527 (implemented in a separate repository, https://github.com/GonzaloFuentes1/dreamer4)
