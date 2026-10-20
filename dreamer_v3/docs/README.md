@@ -1,6 +1,6 @@
 # Dreamer V3 Documentation
 
-🚧 **Status**: This version is implemented but needs fixes before production use.
+**Status**: Work in progress. The code is implemented but needs fixes, and it is not yet wired into `scripts/train.py`.
 
 ## Contents
 
@@ -16,7 +16,7 @@ This documentation directory is under construction. It will contain:
 
 For now, please refer to:
 - [Dreamer V3 Main README](../README.md) - Detailed V3 implementation notes
-- [Original Paper](../2301.04104v2.pdf) - Mastering Diverse Domains through World Models
+- [Original paper (arXiv:2301.04104)](https://arxiv.org/abs/2301.04104) - Mastering Diverse Domains through World Models
 
 ## Known Issues
 
