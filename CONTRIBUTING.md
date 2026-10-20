@@ -105,11 +105,10 @@ def train_agent(config: dict, env_id: str, device: str) -> dict:
 We especially welcome contributions in these areas:
 
 1. **Fix Dreamer V3** - Help fix the V3 implementation issues
-2. **Complete Dreamer V4** - Implement the V4 variant
-3. **Add Documentation** - Improve docs, add examples
-4. **Testing** - Add unit tests and integration tests
-5. **Performance** - Optimize training speed
-6. **Environments** - Add support for more environments
+2. **Add Documentation** - Improve docs, add examples
+3. **Testing** - Add unit tests and integration tests
+4. **Performance** - Optimize training speed
+5. **Environments** - Add support for more environments
 
 ## Testing
 
