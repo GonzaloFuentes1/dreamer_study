@@ -1,472 +1,203 @@
-# Dreamer Study: Complete Implementation of the Dreamer Family
+# Dreamer Study
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.10.0-red.svg)](https://pytorch.org/)
 
-Comprehensive PyTorch implementations of the Dreamer world model family for model-based reinforcement learning. This repository includes implementations of Dreamer V1, V2, V3, and V4 variants.
+PyTorch implementations of the Dreamer family of world models for model-based reinforcement learning, written for study and comparison. The repository contains Dreamer V1, V2 and V3 sharing a common training script, replay buffers and environment wrappers.
 
-**Implementation Status:**
-- ✅ **Dreamer V1**: Complete and working
-- ✅ **Dreamer V2**: Complete and working  
-- 🚧 **Dreamer V3**: Implemented but needs fixes
-- ❌ **Dreamer V4**: Not yet implemented
+## Status
+
+| Version | Status |
+|---------|--------|
+| Dreamer V1 | Implemented and run on DMControl (`walker_walk`, `cheetah_run` configs). |
+| Dreamer V2 | Implemented and run on DMControl (`walker_walk`, `cheetah_run` configs). |
+| Dreamer V3 | Work in progress. The model and agent code is in `dreamer_v3/`, but it needs fixes and is not wired into `scripts/train.py` (selecting `--version v3` raises `NotImplementedError`). |
+
+Dreamer V4 is not part of this repository. A separate implementation is available at https://github.com/GonzaloFuentes1/dreamer4.
+
+This README reports no benchmark results. No training curves or scores are claimed here.
 
 ## Table of Contents
 
-- [Key Features](#key-features)
 - [Project Structure](#project-structure)
 - [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Training](#training)
+- [Usage](#usage)
 - [Version Comparison](#version-comparison)
-- [Architectures](#architectures)
-- [Results and Benchmarks](#results-and-benchmarks)
 - [Documentation](#documentation)
 - [Contributing](#contributing)
 - [References](#references)
 - [License](#license)
 
-## Key Features
-
-- **4 Dreamer versions**: Implementations of V1, V2, V3, and V4
-- **Pure PyTorch**: Clean and modular code without unnecessary dependencies
-- **Reproducible**: Configurations and seeds for reproducing results
-- **Optimized**: Mixed precision training (FP16), torch.compile, and CUDA optimizations
-- **Flexible**: Support for continuous and discrete environments (DMControl, Gymnasium)
-- **Complete evaluation**: Scripts for metrics analysis and visualization
-- **Well documented**: Detailed READMEs and code comments
-
 ## Project Structure
 
 ```
 dreamer_study/
-├── dreamer_v1/              # ✅ Dreamer V1 (Hafner et al., 2020) - Complete
+├── dreamer_v1/              # Dreamer V1: Gaussian latent states
 │   ├── agent.py             # Training algorithm
-│   ├── models.py            # RSSM, RewardModel, ValueModel, ActionModel
-│   ├── networks.py          # Encoder, Decoder, MLP
-│   ├── configs/             # Environment configurations
-│   │   ├── walker_walk.yaml
-│   │   ├── cheetah_run.yaml
-│   │   └── small.yaml
-│   └── docs/                # V1-specific documentation
-│
-├── dreamer_v2/              # ✅ Dreamer V2 (Hafner et al., 2021) - Complete
+│   ├── models.py            # RSSM_V1, WorldModel, RewardModel, ValueModel, ActionModel
+│   ├── networks.py          # ConvEncoder, ConvDecoder, MLP
+│   ├── configs/             # walker_walk.yaml, cheetah_run.yaml, small.yaml
+│   └── docs/                # ALGORITHM.md
+├── dreamer_v2/              # Dreamer V2: 32x32 categorical latent states
 │   ├── agent.py             # Training algorithm
-│   ├── models.py            # RSSM_V2, RewardModel, DiscountModel, ActorModel
-│   ├── networks.py          # Encoder, Decoder with LayerNorm
-│   ├── configs/             # Environment configurations
-│   └── docs/                # V2-specific documentation
-│
-├── dreamer_v3/              # 🚧 Dreamer V3 (Hafner et al., 2024) - Needs fixes
-│   ├── agent.py             # Training algorithm
-│   ├── models.py            # WorldModel, ActorModel, CriticModel, RSSM_V3
-│   ├── networks.py          # Encoder, Decoder, MLP, RMSNorm, BlockLinear
-│   ├── utils.py             # symlog/symexp, twohot, AGC
-│   ├── configs/             # Environment configurations
-│   ├── docs/                # V3-specific documentation
-│   ├── README.md            # Detailed V3 documentation
-│   └── 2301.04104v2.pdf     # Original paper
-│
-├── dreamer_v4/              # ❌ Dreamer V4 - Not implemented yet
-│   └── __init__.py
-│
-├── common/                  # Shared modules
-│   ├── agent.py             # Base Agent class
-│   ├── buffer.py            # Standard ReplayBuffer
-│   ├── buffer_parallel.py   # Parallel buffer for multiple envs
-│   ├── prefetch_buffer.py   # Buffer with prefetching
-│   ├── utils.py             # General utilities
-│   └── debug_utils.py       # Debugging tools
-│
-├── envs/                    # Environment wrappers
-│   └── wrappers.py          # Wrappers for DMControl and Gymnasium
-│
-├── scripts/                 # Training and analysis scripts
-│   ├── train.py             # Main training script
-│   ├── analyze_training.py  # Training metrics analysis
-│   ├── plot_metrics.py      # Results visualization
-│   ├── test_render_simple.py # Rendering test
-│   ├── check_tags.py        # TensorBoard tags verification
-│   └── run_benchmark.sh     # Automatic benchmark
-│
-├── docs/                    # General documentation
-│   └── README.md            # Documentation index
-├── runs/                    # TensorBoard logs (generated)
-├── requirements.txt         # Project dependencies
-├── .editorconfig           # Editor configuration
-├── .gitignore              # Files ignored by git
-├── CONTRIBUTING.md         # Contribution guidelines
-├── LICENSE                 # Apache 2.0 License
-└── README.md               # This file
+│   ├── models.py            # RSSM_V2, WorldModel, RewardModel, DiscountModel, ActorModel, ValueModel
+│   ├── networks.py          # ConvEncoder, ConvDecoder
+│   ├── configs/             # walker_walk.yaml, cheetah_run.yaml, small.yaml
+│   └── docs/                # ALGORITHM.md
+├── dreamer_v3/              # Dreamer V3 (work in progress)
+│   ├── agent.py             # DreamerV3Agent
+│   ├── models.py            # RSSM_V3, WorldModel, RewardModel, ContinueModel, CriticModel, ActorModel
+│   ├── networks.py          # Encoder, Decoder, MLP, RMSNorm, BlockLinear, GRUCell
+│   ├── utils.py             # symlog/symexp, twohot, adaptive gradient clipping
+│   ├── configs/             # walker_walk.yaml, cheetah_run.yaml, breakout.yaml
+│   ├── docs/                # V3 status notes
+│   └── README.md            # V3 implementation notes
+├── common/                  # Shared modules (base agent, replay buffers, utilities)
+├── envs/                    # Environment wrappers (DMControl, Gymnasium)
+├── scripts/                 # train.py and analysis/plotting helpers
+├── docs/                    # Documentation index
+├── requirements.txt         # Pinned dependencies
+├── CONTRIBUTING.md
+└── LICENSE                  # Apache 2.0
 ```
 
 ## Installation
 
-### Prerequisites
-
-- Python 3.8 or higher
-- CUDA 11.8+ (optional, for GPU)
-- 8GB RAM minimum (16GB+ recommended)
-- GPU with 6GB+ VRAM (optional but recommended)
-
-### Quick Installation
+Python 3.10 or newer is required by the pinned dependencies. A CUDA GPU is recommended; `--gpu -1` runs on CPU.
 
 ```bash
-# Clone the repository
-git clone <repository-url>
+git clone https://github.com/GonzaloFuentes1/dreamer_study.git
 cd dreamer_study
 
-# Create virtual environment
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# Install dependencies
 pip install -r requirements.txt
 ```
 
-### Main Dependencies
+Dependency versions are pinned in `requirements.txt`. Note that `scripts/train.py` sets `MUJOCO_GL=egl` at startup, which targets Linux headless rendering.
 
-```
-Core:
-- torch>=2.10.0
-- torchvision>=0.25.0
-- numpy>=2.2.6
-
-RL Environments:
-- gymnasium>=1.2.3
-- dm-control>=1.0.36
-- mujoco>=3.4.0
-- shimmy>=2.0.0
-
-Optimization:
-- pytorch_optimizer>=3.9.0 (LaProp for V3)
-
-Visualization:
-- tensorboard>=2.20.0
-- matplotlib>=3.10.8
-- opencv-python>=4.13.0
-- moviepy>=2.2.1
-```
-
-### Verify Installation
+Quick checks:
 
 ```bash
-# Check PyTorch and CUDA
-python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA: {torch.cuda.is_available()}')"
-
-# Check DMControl
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 python -c "from dm_control import suite; print('DMControl OK')"
 ```
 
-## Quick Start
+## Usage
 
-### Basic Training
+### Training
+
+Run from the repository root. `--version` selects `v1` or `v2`; `--exp` selects a YAML file in `dreamer_<version>/configs/`.
 
 ```bash
-# Train Dreamer V1 on Walker Walk (recommended - working)
 python scripts/train.py --version v1 --exp walker_walk --gpu 0
-
-# Train Dreamer V2 on Cheetah Run (recommended - working)
 python scripts/train.py --version v2 --exp cheetah_run --gpu 0
-
-# Train Dreamer V3 on Walker Walk (needs fixes)
-python scripts/train.py --version v3 --exp walker_walk --gpu 0
-
-# Train on CPU (slower)
-python scripts/train.py --version v1 --exp small --gpu -1
+python scripts/train.py --version v1 --exp small --gpu -1   # CPU
 ```
 
-### Training Script Arguments
+Arguments of `scripts/train.py`:
 
-```bash
-python scripts/train.py \
-  --version v1              # Version: v1, v2, v3
-  --exp walker_walk         # Experiment name (.yaml file)
-  --env walker-walk         # Override environment (optional)
-  --gpu 0                   # GPU to use (0-7, or -1 for CPU)
-  --resume path/to/ckpt.pt  # Resume from checkpoint (optional)
-```
+| Argument | Description |
+|----------|-------------|
+| `--version` | `v1` or `v2` (`v3` is not available yet). Default `v1`. |
+| `--exp` | Config name without `.yaml`. |
+| `--env` | Override the `env` field of the config, for example `dm_control/walker-walk-v0`. |
+| `--gpu` | GPU id, or `-1` for CPU. Default `0`. |
+| `--resume` | Path to a checkpoint (`.pt`) to resume from. |
 
-### Monitoring with TensorBoard
+Each run writes to `runs/<version>/<version>_<exp>_<timestamp>/` with `logs/` (TensorBoard events), `checkpoints/`, `videos/` and `metrics.jsonl`. Checkpoint frequency is set by `logging.save_interval` in the config.
 
-```bash
-# Start TensorBoard
-tensorboard --logdir runs/
+### Configuration
 
-# Open in browser: http://localhost:6006
-```
-
-### Evaluation
-
-```bash
-# Analyze training metrics
-python scripts/analyze_training.py --run_dir runs/v1_walker_walk_<timestamp>
-
-# Plot specific metrics
-python scripts/plot_metrics.py --run_dir runs/v1_walker_walk_<timestamp> \
-                               --metrics reward episode_length
-```
-
-## Training
-
-### Experiment Configuration
-
-Configuration files are in YAML format in `dreamer_*/configs/`:
+Configs are YAML files. The fields below are taken from `dreamer_v1/configs/walker_walk.yaml`:
 
 ```yaml
-# Example: dreamer_v1/configs/walker_walk.yaml
-env: walker-walk
+env: "dm_control/walker-walk-v0"
 action_repeat: 2
-seed: 42
-
-model:
-  rssm:
-    deter_dim: 200
-    stoch_dim: 30
-  num_units: 400
-  lr: 6e-4
-
-actor:
-  lr: 8e-5
-  
-critic:
-  lr: 8e-5
+num_envs: 4
 
 training:
-  batch_size: 50
-  seq_len: 50
-  prefill_steps: 5000
   total_steps: 1000000
-  imagination_horizon: 15
-  mixed_precision: true
+  batch_size: 50
+  seq_length: 50
+
+model:
+  lr: 0.0006
+  kl_free_nats: 3.0
+  rssm:
+    stoch_dim: 30
+    deter_dim: 600
+
+actor:
+  lr: 0.00008
+  horizon: 15
+
+critic:
+  lr: 0.00008
+  gamma: 0.99
+  lambda_: 0.95
 ```
 
-### Supported Environments
+Environment ids with the `dm_control/` prefix use the DMControl wrapper in `envs/wrappers.py`. Any other id is passed to `gymnasium.make`; only DMControl has been exercised with V1 and V2.
 
-#### DMControl Suite
-```
-walker-walk, walker-run, walker-stand
-cheetah-run, cheetah-walk
-hopper-hop, hopper-stand
-humanoid-walk, humanoid-run, humanoid-stand
-quadruped-walk, quadruped-run
-reacher-easy, reacher-hard
-cartpole-balance, cartpole-swingup
+### Monitoring and analysis
+
+```bash
+tensorboard --logdir runs/
+
+# Plot metrics from a run
+python scripts/plot_metrics.py runs/v1/<run_id>/metrics.jsonl --out plots.png
 ```
 
-#### Gymnasium
-```
-Classic Control: CartPole-v1, MountainCar-v0, Pendulum-v1
-Box2D: LunarLander-v2, BipedalWalker-v3
-Atari: (requires additional configuration)
-```
-
-### Best Practices
-
-1. **Start with V1 or V2**: These versions are complete and working
-2. **Use GPU**: Training is 10-50x faster
-3. **Mixed Precision**: Enabled by default, reduces memory usage
-4. **Batch Size**: 16-50 for GPU with 8-12GB VRAM
-5. **Checkpoints**: Automatically saved every 50K steps
-6. **Logs**: TensorBoard logs in `runs/`
+`scripts/analyze_training.py` currently contains hardcoded run paths and has to be edited before use.
 
 ## Version Comparison
 
-| Feature | V1 (2020) ✅ | V2 (2021) ✅ | V3 (2024) 🚧 | V4 ❌ |
-|----------------|-----------|-----------|--------------|-------------------|
-| **Status** | Complete | Complete | Needs fixes | Not implemented |
-| **Latent States** | Gaussian | 32×32 Categorical | 32×32 Categorical | - |
-| **Reward Pred** | MSE | MSE | Symexp twohot (255 bins) | - |
-| **Value Pred** | Scalar MSE | Scalar MSE | Symexp twohot (255 bins) | - |
-| **Continue/Discount** | Fixed γ | Discount predictor | Binary continue c_t | - |
-| **Decoder** | Gaussian | Gaussian | Sigmoid [0,1] | - |
-| **MLP Layers** | 2-3 layers | 4 layers | 5 layers | - |
-| **Units per Layer** | 200-400 | 400 | 640 | - |
-| **Normalization** | None | LayerNorm | RMSNorm | - |
-| **Optimizer** | Adam | Adam | LaProp + AGC | - |
-| **Return Norm** | No | No | EMA percentiles | - |
-| **Loss Magnitude** | ~11,800 | ~11,800 | ~7 | - |
+The table summarizes the implementations in this repository, as read from the code and configs.
 
-### Version Recommendations
+| Aspect | V1 | V2 | V3 (work in progress) |
+|--------|----|----|-----------------------|
+| Latent state | Diagonal Gaussian (`stoch_dim` 30) | 32x32 categorical | 32x32 categorical |
+| Reward head | Scalar, MSE | Scalar, MSE | Symexp twohot, 255 bins |
+| Value head | Scalar, MSE | Scalar, MSE | Symexp twohot, 255 bins |
+| Termination | Fixed discount | Learned discount predictor | Learned continue predictor |
+| Decoder | Gaussian | Gaussian | Sigmoid output in [0, 1] |
+| Normalization | None in the RSSM | LayerNorm in the RSSM | RMSNorm |
+| MLP activation | ELU | ELU | SiLU |
+| Optimizer | Adam | Adam | LaProp (falls back to Adam) with adaptive gradient clipping |
+| Return normalization | No | No | EMA of return percentiles |
 
-**When to use each version:**
-- **V1 or V2**: For production use and new projects (both complete and working)
-- **V3**: For experimental work (needs fixes before production use)
-- **V4**: Not available yet
-
-## Architectures
-
-### RSSM (Recurrent State Space Model)
-
-All versions use variants of the RSSM:
-
-```
-Observation → Encoder → Representation
-                            ↓
-         Deterministic ← Dynamics → Stochastic
-              h_t               z_t
-                ↓                 ↓
-            Decoder         Reward/Value
-```
-
-**V1 RSSM**: Gaussian stochastic states
-```python
-h_t = f(h_{t-1}, z_{t-1}, a_{t-1})  # GRU
-z_t ~ N(μ(h_t, o_t), σ(h_t, o_t))   # Gaussian
-```
-
-**V2/V3 RSSM**: 32×32 categorical states
-```python
-h_t = f(h_{t-1}, z_{t-1}, a_{t-1})      # GRU
-z_t ~ Categorical(32×32)(h_t, o_t)      # 32 classes × 32 variables
-```
-
-### Main Componentde 2 → ReLU
-Conv 4×4, 64 filters, stride 2 → ReLU  
-Conv 4×4, 128 filters, stride 2 → ReLU
-Conv 4×4, 256 filters, stride 2 → ReLU
-Flatten → Linear → (1024,)
-```
-
-**Decoder (Transposed CNN)**
-```
-Linear: latent → (256, 4, 4)
-TransConv 5×5, 128 filters, stride 2 → ReLU
-TransConv 5×5, 64 filters, stride 2 → ReLU
-TransConv 6×6, 32 filters, stride 2 → ReLU
-TransConv 6×6, 3 filters, stride 2 → Sigmoid (V3) / Gaussian (V1/V2)
-```
-
-**MLP (V3)**
-```
-5 layers × 640 units
-RMSNorm + SiLU activation
-Block-diagonal linear for efficiency
-```
+Absolute loss values are not comparable across versions, since the objectives are formulated differently (for example a Gaussian decoder log-likelihood in V1/V2 versus a sigmoid decoder with squared error in V3).
 
 ## Documentation
 
-### Documentation Structure
-
-- [General Documentation](docs/README.md) - Documentation index and guides
-- [Dreamer V1 Documentation](dreamer_v1/docs/) - V1-specific docs
-- [Dreamer V2 Documentation](dreamer_v2/docs/) - V2-specific docs
-- [Dreamer V3 Documentation](dreamer_v3/docs/) - V3-specific docs
-- [Dreamer V3 README](dreamer_v3/README.md) - Detailed V3 implementation notes
-- [Original V3 Paper](dreamer_v3/2301.04104v2.pdf) - Mastering Diverse Domains through World Models
-- [Contributing Guide](CONTRIBUTING.md) - How to contribute to the project
-
-### Loss Magnitude Explanation
-
-**Why is V3 loss (~7) different from V1/V2 (~11,800)?**
-
-Different loss formulations:
-- **V1/V2**: Gaussian decoder `-log p(x|z)` includes constants → ~11,800
-- **V3**: Sigmoid decoder MSE + categorical cross-entropy → ~7
-
-**Both are correct!** Same gradients, different scales. Do not compare magnitudes directly between versions.
-
-### Debugging
-
-```bash
-# Detailed outputs
-python scripts/train.py --version v1 --exp walker_walk --debug
-
-# Quick component test
-python -c "from dreamer_v1.agent import DreamerV1Agent; print('V1 OK')"
-
-# Check buffers
-python common/debug_utils.py
-```
+- [Documentation index](docs/README.md)
+- [Dreamer V1 algorithm notes](dreamer_v1/docs/ALGORITHM.md)
+- [Dreamer V2 algorithm notes](dreamer_v2/docs/ALGORITHM.md)
+- [Dreamer V3 implementation notes](dreamer_v3/README.md)
+- [Dreamer V3 status](dreamer_v3/docs/README.md)
+- [Contributing guide](CONTRIBUTING.md)
 
 ## Contributing
 
-Contributions are welcome! Please:
+See [CONTRIBUTING.md](CONTRIBUTING.md). Open areas:
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-### Areas for Contribution
-
-- [ ] Fix Dreamer V3 implementation
-- [ ] Populate V3 docs/ folder with detailed documentation
-- [ ] Complete Dreamer V4 implementation
-- [ ] More environments (Atari, MuJoCo, etc.)
-- [ ] Distributed training
-- [ ] World model visualization
-- [ ] Documentation improvements
+- Fix the Dreamer V3 implementation and wire it into `scripts/train.py`
+- Documentation and tests
+- Additional environments
+- Distributed training
 
 ## References
 
-### Original Papers
+1. Hafner, D., Lillicrap, T., Ba, J., Norouzi, M. *Dream to Control: Learning Behaviors by Latent Imagination* (Dreamer V1), ICLR 2020. arXiv:[1912.01603](https://arxiv.org/abs/1912.01603)
+2. Hafner, D., Lillicrap, T., Norouzi, M., Ba, J. *Mastering Atari with Discrete World Models* (Dreamer V2), ICLR 2021. arXiv:[2010.02193](https://arxiv.org/abs/2010.02193)
+3. Hafner, D., Pasukonis, J., Ba, J., Lillicrap, T. *Mastering Diverse Domains through World Models* (Dreamer V3). arXiv:[2301.04104](https://arxiv.org/abs/2301.04104)
+4. Hafner, D., Yan, W., Lillicrap, T. *Training Agents Inside of Scalable World Models* (Dreamer 4). arXiv:[2509.24527](https://arxiv.org/abs/2509.24527). Implementation in a separate repository: https://github.com/GonzaloFuentes1/dreamer4
 
-**Dreamer V1** (2020)
-```bibtex
-@article{hafner2020dream,
-  title={Dream to Control: Learning Behaviors by Latent Imagination},
-  author={Hafner, Danijar and Lillicrap, Timothy and Ba, Jimmy and Norouzi, Mohammad},
-  journal={ICLR},
-  year={2020}
-}
-```
-
-**Dreamer V2** (2021)
-```bibtex
-@article{hafner2021mastering,
-  title={Mastering Atari with Discrete World Models},
-  author={Hafner, Danijar and Lillicrap, Timothy and Norouzi, Mohammad and Ba, Jimmy},
-  journal={ICLR},
-  year={2021}
-}
-```
-
-**Dreamer V3** (2024)
-```bibtex
-@article{hafner2024dreamerv3,
-  title={Mastering Diverse Domains through World Models},
-  author={Hafner, Danijar and Pasukonis, Jurgis and Ba, Jimmy and Lillicrap, Timothy},
-  journal={arXiv preprint arXiv:2301.04104},
-  year={2024}
-}Additional Resources
-
-- [Dreamer Official Website](https://danijar.com/project/dreamerv3/)
-- [DMControl Documentation](https://github.com/deepmind/dm_control)
-- [Gymnasium Documentation](https://gymnasium.farama.org/)
+Other resources: [DMControl](https://github.com/google-deepmind/dm_control), [Gymnasium](https://gymnasium.farama.org/).
 
 ## License
 
-This project is licensed under Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
-
-## Authors and Acknowledgments
-
-- **Original Implementation**: Based on papers by Danijar Hafner et al.
-- **Contributors**: See full list on GitHub
-- **Special thanks**: To the RL community and original authors
-
-## Contact
-
-For questions, issues, or collaborations, please open an issue on GitHub.
-
----
-
-**Last updated**: January 2026  
-**Project status**: Active development  
-**Recommended version**: Dreamer V1 or V2 (complete and working)
-**Última actualización**: Enero 2026  
-**Estado del proyecto**: Activo en desarrollo  
-**Versión recomendada**: Dreamer V3
-
-## Citations
-
-```bibtex
-@article{hafner2024dreamerv3,
-  title={Mastering Diverse Domains through World Models},
-  author={Hafner, Danijar and Pasukonis, Jurgis and Ba, Jimmy and Lillicrap, Timothy},
-  journal={arXiv preprint arXiv:2301.04104},
-  year={2024}
-}
-```
+Apache License 2.0. See [LICENSE](LICENSE).
